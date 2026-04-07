@@ -64,6 +64,7 @@ class ExperimentResult:
     pymoo_result: Any
     elapsed_time: float
     baselines: dict[str, BaselineResult] = field(default_factory=dict)
+    generation_history: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Convenience properties
@@ -178,7 +179,11 @@ class Experiment:
     # Public API
     # ------------------------------------------------------------------
 
-    def run(self, baselines: list[str] | None = None) -> ExperimentResult:
+    def run(
+        self,
+        baselines: list[str] | None = None,
+        callback=None,
+    ) -> ExperimentResult:
         """Run the evolutionary search and optionally one or more baselines.
 
         Parameters
@@ -187,6 +192,10 @@ class Experiment:
             List of baseline names to run alongside the main search.
             Supported: ``"no_compression"``, ``"all_transformations"``,
             ``"random_search"``.  Pass ``None`` (default) to skip baselines.
+        callback:
+            Optional pymoo :class:`~pymoo.core.callback.Callback` instance
+            injected into the ``minimize`` call (e.g. for per-generation
+            history tracking).
 
         Returns
         -------
@@ -207,10 +216,12 @@ class Experiment:
             ("n_gen", self.config.n_gen),
             seed=self.config.seed,
             verbose=self.config.verbose,
+            callback=callback,
         )
         elapsed = time.perf_counter() - t0
 
         pareto_solutions, pareto_objectives, pareto_names = self._parse_result(res, problem)
+        history = getattr(callback, "history", [])
 
         baseline_results: dict[str, BaselineResult] = {}
         if baselines:
@@ -225,7 +236,38 @@ class Experiment:
             pymoo_result=res,
             elapsed_time=elapsed,
             baselines=baseline_results,
+            generation_history=history,
         )
+
+    def evaluate_solutions(
+        self,
+        solutions: np.ndarray,
+        dataset: list[dict],
+    ) -> np.ndarray:
+        """Score a set of binary solution vectors on an arbitrary dataset.
+
+        Used to re-evaluate search-phase Pareto solutions on held-out test
+        data without re-running the optimisation.
+
+        Parameters
+        ----------
+        solutions:
+            Integer array of shape ``(n_solutions, n_var)``.
+        dataset:
+            List of sample dicts to evaluate on.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(n_solutions, 2)`` — columns ``[avg_tokens, avg_performance]``
+            (performance is *positive*).
+        """
+        problem = self._build_problem(dataset)
+        objectives = np.empty((len(solutions), 2), dtype=float)
+        for i, bits in enumerate(solutions):
+            tokens, perf = problem.score_solution(bits)
+            objectives[i] = [tokens, perf]
+        return objectives
 
     def run_baseline(
         self,
