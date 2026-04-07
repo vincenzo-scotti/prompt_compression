@@ -142,6 +142,12 @@ class Experiment:
         Ordered list of :class:`Transformation` *classes* to include in
         the search space.  Defaults to all 28 from the paper, filtered by
         ``config.transformation_ids`` if set.
+    transformation_factory:
+        Optional callable ``(cls: type[Transformation]) -> Transformation``
+        invoked to instantiate each transformation.  Use this to inject
+        backends (e.g. an LLM) into semantic transformations without
+        changing the class interface.  When ``None`` (default), each class
+        is instantiated with no arguments: ``cls()``.
 
     Example
     -------
@@ -159,12 +165,14 @@ class Experiment:
         evaluator: Evaluator | None = None,
         tokenizer: Tokenizer | None = None,
         transformations: list[type[Transformation]] | None = None,
+        transformation_factory=None,
     ) -> None:
         self.config = config
         self._full_dataset = dataset
         self._evaluator = evaluator or MockEvaluator()
         self._tokenizer = tokenizer or WhitespaceTokenizer()
         self._transform_classes = self._resolve_transformations(transformations)
+        self._transformation_factory = transformation_factory or (lambda cls: cls())
 
     # ------------------------------------------------------------------
     # Public API
@@ -279,7 +287,7 @@ class Experiment:
 
     def _build_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
         """Instantiate the pymoo problem with pre-built transformation objects."""
-        instances = [T() for T in self._transform_classes]
+        instances = [self._transformation_factory(T) for T in self._transform_classes]
         return PromptCompressionProblem(
             transformations=instances,
             dataset=dataset,
