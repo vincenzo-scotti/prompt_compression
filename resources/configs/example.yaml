@@ -1,0 +1,49 @@
+model:
+  type: hf                              # hf | openai | vllm
+  name: mistralai/Mistral-7B-v0.1
+  kwargs:
+    device: cuda
+    dtype: float16
+
+output:
+  dir: ./results
+  overwrite: false
+
+# Defaults inherited by every run (override per-run as needed)
+defaults:
+  num_fewshot: 0
+  search_split: validation
+  test_split: test
+  n_search: 200
+  n_test: 500
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+  use_llm_for_semantic: true
+  algorithm: nsga2
+  pop_size: 50
+  n_gen: 100
+  seed: 42
+  subset_seed: 42
+  transformation_ids: null              # null = all 28 operators
+
+runs:
+  # Same model, different tasks
+  - name: hellaswag_nsga2
+    task: hellaswag
+
+  - name: arc_easy_nsga2
+    task: arc_easy
+
+  # Same task, different algorithms (for ablation)
+  - name: hellaswag_moead
+    task: hellaswag
+    algorithm: moead
+    pop_size: 30
+
+  # Restricted operator set
+  - name: hellaswag_lexical_only
+    task: hellaswag
+    transformation_ids: [O1, O2, O3, O4, O5, O6, O7, O8]
+    n_gen: 50
