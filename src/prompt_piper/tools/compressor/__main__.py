@@ -34,6 +34,17 @@ from .config import CompressorConfig
 from .runner import CompressorRunner
 
 
+def _load_dotenv(verbose: bool = False) -> None:
+    """Load variables from a .env file if python-dotenv is installed."""
+    try:
+        from dotenv import load_dotenv
+        loaded = load_dotenv(override=False)  # don't override already-set vars
+        if verbose and loaded:
+            print("Loaded environment variables from .env")
+    except ImportError:
+        pass  # python-dotenv is optional
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -208,6 +219,8 @@ def _build_config(args: argparse.Namespace) -> CompressorConfig:
 def main(argv: list[str] | None = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    _load_dotenv(verbose=args.verbose)
 
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
