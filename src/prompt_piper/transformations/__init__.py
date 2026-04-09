@@ -6,6 +6,7 @@ All transformation classes are exported from this package so callers can do::
 """
 
 from prompt_piper.transformations.base import Transformation
+from prompt_piper.transformations.fitting import DatasetVocabularyFitter
 
 # Lexical (O1–O8)
 from prompt_piper.transformations.lexical import (
@@ -54,6 +55,8 @@ from prompt_piper.transformations.semantic import (
 __all__ = [
     # Base
     "Transformation",
+    # Fitting
+    "DatasetVocabularyFitter",
     # Lexical
     "RemoveExtraWhitespace",   # O1
     "TrimSpaces",              # O2
