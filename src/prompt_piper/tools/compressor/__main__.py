@@ -115,6 +115,16 @@ def _build_parser() -> argparse.ArgumentParser:
     alg.add_argument("--no-llm-semantic", action="store_true",
                      help="Disable LLM backend for semantic transformations "
                           "(use heuristic fallbacks instead)")
+    alg.add_argument(
+        "--compress-field",
+        metavar="FIELD",
+        help=(
+            "Dataset field to apply transformations to.  "
+            "Omit (default) to compress the fully formatted prompt.  "
+            "Pass 'prompt_template' to compress only the 0-shot template "
+            "(few-shot examples are excluded from compression)."
+        ),
+    )
 
     # ---- Output ------------------------------------------------------------
     out = p.add_argument_group("output")
@@ -206,6 +216,7 @@ def _build_config(args: argparse.Namespace) -> CompressorConfig:
         "use_llm_for_semantic": (
             False if args.no_llm_semantic else None
         ),
+        "compress_field": args.compress_field,
     }
     cfg = cfg.apply_cli_overrides(run_overrides)
 

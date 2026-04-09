@@ -204,9 +204,12 @@ class CompressorRunner:
             LMEvalSemanticBackend(model) if run_cfg.use_llm_for_semantic else None
         )
 
+        import inspect
+
         def factory(cls):
             if semantic_backend and cls.category == "semantic":
-                return cls(backend=semantic_backend)
+                if "backend" in inspect.signature(cls.__init__).parameters:
+                    return cls(backend=semantic_backend)
             return cls()
 
         return {
@@ -223,28 +226,44 @@ class CompressorRunner:
             # Generate synthetic data for dry runs
             return self._synthetic_dataset(n=max(run_cfg.n_search, run_cfg.n_test or 0) + 10)
 
+        # When compressing a field other than the main prompt, ask the dataset
+        # to also store the 0-shot template under that field name.
+        template_field = (
+            run_cfg.compress_field
+            if run_cfg.compress_field and run_cfg.compress_field != run_cfg.prompt_field
+            else None
+        )
+
         from prompt_piper.backends.lm_eval import LMEvalDataset
         ds = LMEvalDataset(
             backend["task"],
             split=split,
             num_fewshot=run_cfg.num_fewshot,
             prompt_field=run_cfg.prompt_field,
+            template_field=template_field,
         )
         return ds.as_list()
 
     @staticmethod
     def _synthetic_dataset(n: int = 50) -> list[dict]:
         """Minimal synthetic dataset for dry-run / CI testing."""
-        prompts = [
+        templates = [
             "Please kindly classify the sentiment of the following text.",
             "Your task is to analyze whether the text is positive or negative.",
             "Could you determine the sentiment label for the sentence below?",
             "In order to complete this task, read the context and answer.",
             "You are required to provide a concise answer to the question.",
         ]
+        contexts = [
+            "Example: The movie was great. Answer: positive\n\n",
+            "Example: I hated the food. Answer: negative\n\n",
+        ]
         return [
             {
-                "prompt": prompts[i % len(prompts)],
+                # Full formatted prompt (template + simulated few-shot context)
+                "prompt": contexts[i % len(contexts)] + templates[i % len(templates)],
+                # Raw 0-shot template (no few-shot examples)
+                "prompt_template": templates[i % len(templates)],
                 "target": "positive" if i % 2 == 0 else "negative",
             }
             for i in range(n)
@@ -264,6 +283,7 @@ class CompressorRunner:
     def _make_exp_config(run_cfg: RunConfig, n_subset: int) -> ExperimentConfig:
         return ExperimentConfig(
             prompt_field=run_cfg.prompt_field,
+            compress_field=run_cfg.compress_field,
             n_subset=n_subset,
             subset_seed=run_cfg.subset_seed,
             algorithm=run_cfg.algorithm,

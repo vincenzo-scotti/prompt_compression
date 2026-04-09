@@ -37,6 +37,13 @@ class PromptCompressionProblem(Problem):
         :class:`Tokenizer` used to count tokens in compressed prompts.
     prompt_field:
         Key inside each sample dict that holds the prompt string.
+    compress_field:
+        Key inside each sample dict to apply transformations to.  When
+        ``None`` (default) falls back to ``prompt_field``.  Setting this to
+        a different field (e.g. ``"prompt_template"``) lets you compress a
+        template/0-shot prompt while keeping the full formatted prompt in
+        ``prompt_field`` for any downstream use.  Token counts and evaluator
+        calls both operate on the compressed value of this field.
     """
 
     def __init__(
@@ -46,6 +53,7 @@ class PromptCompressionProblem(Problem):
         evaluator: Evaluator,
         tokenizer: Tokenizer,
         prompt_field: str = "prompt",
+        compress_field: str | None = None,
     ) -> None:
         super().__init__(
             n_var=len(transformations),
@@ -59,6 +67,7 @@ class PromptCompressionProblem(Problem):
         self._evaluator = evaluator
         self._tokenizer = tokenizer
         self._prompt_field = prompt_field
+        self._compress_field = compress_field or prompt_field
 
     # ------------------------------------------------------------------
     # pymoo interface
@@ -82,7 +91,7 @@ class PromptCompressionProblem(Problem):
         total_tokens = 0.0
         total_perf = 0.0
         for sample in self._dataset:
-            original: str = sample[self._prompt_field]
+            original: str = sample[self._compress_field]
             compressed = original
             for transform in pipeline:
                 compressed = transform(compressed)

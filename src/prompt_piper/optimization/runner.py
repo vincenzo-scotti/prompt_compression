@@ -210,13 +210,17 @@ class Experiment:
         )
 
         t0 = time.perf_counter()
+        minimize_kwargs = dict(
+            seed=self.config.seed,
+            verbose=self.config.verbose,
+        )
+        if callback is not None:
+            minimize_kwargs["callback"] = callback
         res = minimize(
             problem,
             algorithm,
             ("n_gen", self.config.n_gen),
-            seed=self.config.seed,
-            verbose=self.config.verbose,
-            callback=callback,
+            **minimize_kwargs,
         )
         elapsed = time.perf_counter() - t0
 
@@ -336,6 +340,7 @@ class Experiment:
             evaluator=self._evaluator,
             tokenizer=self._tokenizer,
             prompt_field=self.config.prompt_field,
+            compress_field=self.config.compress_field,
         )
 
     @staticmethod

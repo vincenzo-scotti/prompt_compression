@@ -131,7 +131,12 @@ class LMEvalDataset:
     limit:
         Cap the number of samples returned (``None`` = all).
     prompt_field:
-        Key used for the prompt in the output dict.
+        Key used for the full (few-shot) prompt in the output dict.
+    template_field:
+        When set, each sample also gets a ``template_field`` key containing
+        the 0-shot prompt (i.e. ``fewshot_context(doc, 0)``).  Pass this
+        field name as ``compress_field`` in :class:`ExperimentConfig` to
+        compress the raw template instead of the full formatted prompt.
     """
 
     def __init__(
@@ -141,12 +146,14 @@ class LMEvalDataset:
         num_fewshot: int = 0,
         limit: int | None = None,
         prompt_field: str = "prompt",
+        template_field: str | None = None,
     ) -> None:
         self._task = task
         self._split = split
         self._num_fewshot = num_fewshot
         self._limit = limit
         self._prompt_field = prompt_field
+        self._template_field = template_field
 
     # ------------------------------------------------------------------
     # Public API
@@ -180,11 +187,12 @@ class LMEvalDataset:
         num_fewshot: int = 0,
         limit: int | None = None,
         prompt_field: str = "prompt",
+        template_field: str | None = None,
     ) -> "LMEvalDataset":
         """Convenience constructor — loads the task by name."""
         task = _load_task(task_name, num_fewshot=num_fewshot)
         return cls(task, split=split, num_fewshot=num_fewshot, limit=limit,
-                   prompt_field=prompt_field)
+                   prompt_field=prompt_field, template_field=template_field)
 
     # ------------------------------------------------------------------
     # Internals
@@ -209,11 +217,18 @@ class LMEvalDataset:
                 doc, self._num_fewshot, rnd=None, description=None
             )
         target = self._task.doc_to_target(doc)
-        return {
+        sample = {
             self._prompt_field: prompt,
             "target": target,
             "_doc": doc,
         }
+        if self._template_field is not None:
+            try:
+                template = self._task.fewshot_context(doc, 0)
+            except TypeError:
+                template = self._task.fewshot_context(doc, 0, rnd=None, description=None)
+            sample[self._template_field] = template
+        return sample
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +455,7 @@ class LMEvalBackend:
         num_fewshot: int = 0,
         limit: int | None = None,
         prompt_field: str = "prompt",
+        template_field: str | None = None,
     ) -> LMEvalDataset:
         """Return a :class:`LMEvalDataset` for the given split."""
         return LMEvalDataset(
@@ -448,6 +464,7 @@ class LMEvalBackend:
             num_fewshot=num_fewshot,
             limit=limit,
             prompt_field=prompt_field,
+            template_field=template_field,
         )
 
     # ------------------------------------------------------------------
@@ -478,14 +495,26 @@ class LMEvalBackend:
             If ``True`` (default), semantic transformations (O23–O28) are
             instantiated with the LLM backend.  If ``False``, the heuristic
             fallbacks are used.
+
+        Notes
+        -----
+        When ``config.compress_field`` differs from ``config.prompt_field``,
+        the dataset is built with ``template_field=config.compress_field`` so
+        each sample contains the 0-shot prompt under that key.
         """
         from prompt_piper.optimization.runner import Experiment
 
+        template_field = (
+            config.compress_field
+            if config.compress_field and config.compress_field != config.prompt_field
+            else None
+        )
         dataset = self.get_dataset(
             split=split,
             num_fewshot=num_fewshot,
             limit=config.n_subset,
             prompt_field=config.prompt_field,
+            template_field=template_field,
         ).as_list()
 
         factory = self._make_transformation_factory(use_llm_for_semantic)
@@ -506,11 +535,13 @@ class LMEvalBackend:
         self, use_llm_for_semantic: bool
     ) -> Callable[[type[Transformation]], Transformation]:
         """Return a factory that injects the LLM backend into semantic ops."""
+        import inspect
         backend = self.semantic_backend if use_llm_for_semantic else None
 
         def factory(cls: type[Transformation]) -> Transformation:
             if backend is not None and cls.category == "semantic":
-                return cls(backend=backend)
+                if "backend" in inspect.signature(cls.__init__).parameters:
+                    return cls(backend=backend)
             return cls()
 
         return factory
