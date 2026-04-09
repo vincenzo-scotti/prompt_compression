@@ -182,6 +182,7 @@ class SectionPruning(Transformation):
 
     def __init__(self, sections: list[str] | None = None) -> None:
         headings = sections if sections is not None else _DEFAULT_PRUNABLE_SECTIONS
+        self._headings = list(headings)
         self._patterns = [_build_section_pattern(h) for h in headings]
 
     def apply(self, prompt: str) -> str:
