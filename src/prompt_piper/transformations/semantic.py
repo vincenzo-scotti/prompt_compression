@@ -121,7 +121,13 @@ class InstructionSummarization(Transformation):
 
     def apply(self, prompt: str) -> str:
         if self._marker is None:
-            return self._summarise(prompt)
+            # Without an explicit instruction_marker we cannot reliably
+            # locate the instruction block using heuristics alone.  Defer
+            # to the no-op path when no LLM backend is available so we
+            # don't accidentally truncate the prompt to a few-shot fragment.
+            if self.backend is not None:
+                return self._summarise(prompt)
+            return prompt
 
         paragraphs = _split_paragraphs(prompt)
         result: list[str] = []

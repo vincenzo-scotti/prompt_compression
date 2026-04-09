@@ -14,7 +14,12 @@ from .base import Transformation
 # ---------------------------------------------------------------------------
 
 class RemoveExtraWhitespace(Transformation):
-    """O1 – Remove redundant whitespace and blank lines."""
+    """O1 – Remove redundant whitespace and collapse multiple blank lines.
+
+    Horizontal whitespace (spaces/tabs) is collapsed to a single space on each
+    line.  Multiple consecutive blank lines are collapsed to a single blank
+    line so that paragraph structure is preserved.
+    """
 
     id = "O1"
     name = "RemoveExtraWhitespace"
@@ -23,9 +28,18 @@ class RemoveExtraWhitespace(Transformation):
     def apply(self, prompt: str) -> str:
         # Collapse runs of spaces/tabs to a single space and strip each line.
         lines = [re.sub(r"[ \t]+", " ", line).strip() for line in prompt.splitlines()]
-        # Drop lines that are now entirely whitespace.
-        lines = [line for line in lines if line]
-        return "\n".join(lines)
+        # Collapse multiple consecutive blank lines to one; keep single blank lines.
+        result: list[str] = []
+        prev_blank = False
+        for line in lines:
+            if line:
+                result.append(line)
+                prev_blank = False
+            elif not prev_blank:
+                result.append(line)
+                prev_blank = True
+            # else: skip second-or-later consecutive blank line
+        return "\n".join(result).strip()
 
 
 # ---------------------------------------------------------------------------
