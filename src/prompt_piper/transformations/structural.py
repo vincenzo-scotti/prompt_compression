@@ -224,6 +224,10 @@ class ExampleRemoval(Transformation):
         to_remove = matches[-self._n :]
         # Remove from right to left to preserve offsets.
         for m in reversed(to_remove):
+            # Safety: if the matched block covers the entire prompt there is
+            # nothing left after removal — skip rather than returning "".
+            if m.start() == 0 and m.end() >= len(prompt.rstrip()):
+                continue
             prompt = prompt[: m.start()] + prompt[m.end() :]
         return prompt.strip()
 

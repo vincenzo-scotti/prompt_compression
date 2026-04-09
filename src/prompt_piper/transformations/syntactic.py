@@ -15,7 +15,11 @@ from .base import Transformation
 
 # Simple heuristic: merge pairs of short consecutive sentences separated by
 # a full stop + space into a single sentence joined by "; ".
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+# Only split on "." (full stop), not "?" or "!", to avoid breaking
+# question-answer pairs inside few-shot examples.  Use " +" (space only,
+# not \s+) so newlines inside a paragraph are not treated as sentence
+# boundaries.
+_SENTENCE_SPLIT = re.compile(r"(?<=\.) +(?=[A-Z])")
 
 _SHORT_SENTENCE_THRESHOLD = 10  # words
 
