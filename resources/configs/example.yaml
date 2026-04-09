@@ -27,6 +27,7 @@ defaults:
   seed: 42
   subset_seed: 42
   transformation_ids: null              # null = all 28 operators
+  compress_field: null                  # null = compress the full formatted prompt
 
 runs:
   # Same model, different tasks
@@ -47,3 +48,9 @@ runs:
     task: hellaswag
     transformation_ids: [O1, O2, O3, O4, O5, O6, O7, O8]
     n_gen: 50
+
+  # Template-mode comparison: compress only the 0-shot template,
+  # excluding few-shot examples from compression.
+  - name: hellaswag_template_compression
+    task: hellaswag
+    compress_field: prompt_template
