@@ -91,6 +91,7 @@ class CompressorRunner:
             config=exp_config,
             dataset=search_dataset,
             evaluator=backend["evaluator"],
+            tokenizer=backend.get("tokenizer"),
             transformations=transform_classes,
             transformation_factory=factory,
         )
@@ -207,12 +208,14 @@ class CompressorRunner:
             LMEvalBackend,
             LMEvalEvaluator,
             LMEvalSemanticBackend,
+            LMEvalTokenizer,
             _load_task,
         )
 
         model = self._get_model()
         task = _load_task(run_cfg.task, num_fewshot=run_cfg.num_fewshot)
         evaluator = LMEvalEvaluator(model, task)
+        tokenizer = LMEvalTokenizer(model)
         semantic_backend = (
             LMEvalSemanticBackend(model) if run_cfg.use_llm_for_semantic else None
         )
@@ -227,6 +230,7 @@ class CompressorRunner:
 
         return {
             "evaluator": evaluator,
+            "tokenizer": tokenizer,
             "task": task,
             "transformation_factory": factory,
             "semantic_backend": semantic_backend,

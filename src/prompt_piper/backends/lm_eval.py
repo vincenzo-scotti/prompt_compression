@@ -31,6 +31,7 @@ from typing import Callable, Iterator
 import numpy as np
 
 from prompt_piper.optimization.evaluator import Evaluator
+from prompt_piper.optimization.tokenizer import Tokenizer, WhitespaceTokenizer
 from prompt_piper.transformations.base import Transformation
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,151 @@ def _call_model(model, method: str, requests: list):
     both Instance-based (lm-eval >= 0.4) and tuple-based (older) APIs."""
     fn = getattr(model, method)
     return fn(requests)
+
+
+# ---------------------------------------------------------------------------
+# 0. Model-backed tokenizer
+# ---------------------------------------------------------------------------
+
+class LMEvalTokenizer(Tokenizer):
+    """Count tokens using the same tokenizer the model uses.
+
+    Wraps the underlying tokenizer exposed by the lm-eval model object so that
+    token-count objectives reflect the model's actual vocabulary rather than a
+    whitespace approximation.
+
+    Detection order
+    ---------------
+    1. **``model.tokenizer`` is a tokenizer object** — covers HuggingFace
+       (``HFLM``), vLLM, OpenAI via lm-eval (uses tiktoken internally), and
+       Anthropic Claude via lm-eval (uses ``client.get_tokenizer()``).
+       Anything whose ``.encode(text)`` returns a sequence of tokens is handled
+       here.  Plain Python ``str`` objects (which also have ``.encode()``) are
+       excluded explicitly.
+    2. **``model.encoding_name`` / ``model.tokenizer_name``** — tiktoken
+       encoding name exposed by some lm-eval OpenAI wrappers.  ``tiktoken``
+       must be installed (``pip install tiktoken``).
+    3. **``model.tokenizer`` is a string** (model or encoding name) — covers
+       self-hosted OpenAI-compatible servers (``LocalCompletionsAPI``).
+       Tries tiktoken first, then falls back to loading a HuggingFace
+       ``AutoTokenizer`` by that name (requires ``transformers``).
+    4. **Fallback** — :class:`~prompt_piper.optimization.tokenizer.WhitespaceTokenizer`
+       with a logged warning.
+
+    Parameters
+    ----------
+    model:
+        An lm-eval LM object (``HFLM``, ``OpenAICompletionsAPI``,
+        ``LocalCompletionsAPI``, ``AnthropicLM``, ``VLLM``, …).
+
+    Notes
+    -----
+    *Anthropic SDK deprecation*: ``client.get_tokenizer()`` was removed in
+    Anthropic SDK ≥ 0.20.  If ``AnthropicLM`` fails to initialise because of
+    this, lm-eval itself will error before ``LMEvalTokenizer`` is ever called.
+    When using a recent SDK and a Claude model, pass an explicit ``tokenizer``
+    to :meth:`LMEvalBackend.build_experiment` — e.g. a
+    :class:`~prompt_piper.optimization.tokenizer.TiktokenTokenizer` with
+    ``"cl100k_base"`` as a reasonable approximation.
+
+    *Self-hosted models*: for models accessed via an OpenAI-compatible API
+    whose name cannot be resolved to a tiktoken encoding (e.g. ``"llama3"``),
+    detection falls through to :class:`WhitespaceTokenizer`.  Pass an explicit
+    tokenizer or load the HuggingFace tokenizer manually in that case.
+    """
+
+    def __init__(self, model) -> None:
+        self._counter = self._build_counter(model)
+
+    # ------------------------------------------------------------------
+    # Tokenizer interface
+    # ------------------------------------------------------------------
+
+    def count(self, text: str) -> int:
+        return self._counter(text)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_counter(model):
+        """Return a callable ``(text: str) -> int`` for the given model."""
+        tok_attr = getattr(model, "tokenizer", None)
+
+        # ---- 1. tokenizer object with .encode() -------------------------
+        # Explicitly exclude plain strings — str.encode() returns bytes, not
+        # tokens, so len(str.encode(text)) would silently be a byte count.
+        if tok_attr is not None and not isinstance(tok_attr, str):
+            encode_fn = getattr(tok_attr, "encode", None)
+            if callable(encode_fn):
+                def _obj_count(text: str, _enc=encode_fn) -> int:
+                    return len(_enc(text))
+                return _obj_count
+
+        # ---- 2. tiktoken via encoding_name / tokenizer_name -------------
+        # Some lm-eval OpenAI wrappers set model.encoding_name or
+        # model.tokenizer_name to a tiktoken-resolvable string.
+        try:
+            import tiktoken  # noqa: PLC0415
+            enc_name = (
+                getattr(model, "encoding_name", None)
+                or getattr(model, "tokenizer_name", None)
+            )
+            if enc_name and isinstance(enc_name, str):
+                try:
+                    enc = tiktoken.encoding_for_model(enc_name)
+                except KeyError:
+                    enc = tiktoken.get_encoding(enc_name)
+                def _tiktoken_count(text: str, _enc=enc) -> int:
+                    return len(_enc.encode(text))
+                return _tiktoken_count
+        except ImportError:
+            pass
+
+        # ---- 3. model.tokenizer is a string (e.g. LocalCompletionsAPI) --
+        # Try to resolve the model/encoding name to a real tokenizer.
+        if isinstance(tok_attr, str) and tok_attr:
+            # 3a. tiktoken — works for OpenAI model names and encoding names.
+            try:
+                import tiktoken  # noqa: PLC0415
+                try:
+                    enc = tiktoken.encoding_for_model(tok_attr)
+                except KeyError:
+                    try:
+                        enc = tiktoken.get_encoding(tok_attr)
+                    except ValueError:
+                        enc = None
+                if enc is not None:
+                    def _name_tiktoken_count(text: str, _enc=enc) -> int:
+                        return len(_enc.encode(text))
+                    return _name_tiktoken_count
+            except ImportError:
+                pass
+
+            # 3b. HuggingFace AutoTokenizer — works for HF model names used
+            # as the tokenizer string (e.g. "mistralai/Mistral-7B-v0.1").
+            try:
+                from transformers import AutoTokenizer  # noqa: PLC0415
+                hf_tok = AutoTokenizer.from_pretrained(tok_attr)
+                logger.info(
+                    "LMEvalTokenizer: loaded HuggingFace tokenizer %r from model name.",
+                    tok_attr,
+                )
+                def _hf_name_count(text: str, _tok=hf_tok) -> int:
+                    return len(_tok.encode(text))
+                return _hf_name_count
+            except Exception:
+                pass
+
+        # ---- 4. Fallback: whitespace ------------------------------------
+        logger.warning(
+            "LMEvalTokenizer: could not resolve a tokenizer for model %r; "
+            "falling back to whitespace splitting.  For accurate token counts "
+            "pass an explicit tokenizer= to build_experiment().",
+            type(model).__name__,
+        )
+        return WhitespaceTokenizer().count
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +557,7 @@ class LMEvalBackend:
     def __init__(self, model, task) -> None:
         self.model = model
         self.task = task
+        self.tokenizer = LMEvalTokenizer(model)
         self.semantic_backend = LMEvalSemanticBackend(model)
         self.evaluator = LMEvalEvaluator(model, task)
 
@@ -480,6 +627,7 @@ class LMEvalBackend:
         num_fewshot: int = 0,
         transformations: list[type[Transformation]] | None = None,
         use_llm_for_semantic: bool = True,
+        tokenizer: Tokenizer | None = None,
     ):
         """Return a fully configured :class:`~prompt_piper.optimization.runner.Experiment`.
 
@@ -497,6 +645,14 @@ class LMEvalBackend:
             If ``True`` (default), semantic transformations (O23–O28) are
             instantiated with the LLM backend.  If ``False``, the heuristic
             fallbacks are used.
+        tokenizer:
+            :class:`~prompt_piper.optimization.tokenizer.Tokenizer` used to
+            count tokens in the compressed prompt.  Defaults to
+            :class:`LMEvalTokenizer` which wraps the loaded model's own
+            tokenizer (HuggingFace ``PreTrainedTokenizer`` for ``hf``/``vllm``
+            models; ``tiktoken`` for OpenAI models).  Pass an explicit
+            tokenizer to override, or ``False`` to fall back to the
+            :class:`~prompt_piper.optimization.tokenizer.WhitespaceTokenizer`.
 
         Notes
         -----
@@ -521,10 +677,19 @@ class LMEvalBackend:
 
         factory = self._make_transformation_factory(use_llm_for_semantic)
 
+        # Resolve tokenizer: use model-native by default, allow explicit override.
+        if tokenizer is False:
+            resolved_tokenizer = None   # Experiment will use WhitespaceTokenizer
+        elif tokenizer is None:
+            resolved_tokenizer = self.tokenizer
+        else:
+            resolved_tokenizer = tokenizer
+
         return Experiment(
             config=config,
             dataset=dataset,
             evaluator=self.evaluator,
+            tokenizer=resolved_tokenizer,
             transformations=transformations,
             transformation_factory=factory,
         )
