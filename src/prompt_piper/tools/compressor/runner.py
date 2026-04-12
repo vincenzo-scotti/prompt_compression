@@ -70,10 +70,21 @@ class CompressorRunner:
         transform_ids = [T.id for T in transform_classes]
         transform_names = [T.name for T in transform_classes]
 
-        # ---- Search phase ------------------------------------------------
+        # ---- Fitting phase (optional) ------------------------------------
         search_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.search_split)
+        semantic_backend = backend.get("semantic_backend")
+
+        if run_cfg.use_fitting:
+            fitted, fitting_report = self._run_fitting(
+                run_cfg, search_dataset, semantic_backend
+            )
+            factory = self._compose_factory(fitted, semantic_backend)
+        else:
+            fitting_report = None
+            factory = backend.get("transformation_factory")
+
+        # ---- Search phase ------------------------------------------------
         exp_config = self._make_exp_config(run_cfg, n_subset=run_cfg.n_search)
-        factory = backend.get("transformation_factory")
         callback = GenerationCallback(transform_names)
 
         exp = Experiment(
@@ -158,6 +169,7 @@ class CompressorRunner:
             baselines=baseline_evals,
             generation_history=exp_result.generation_history,
             extra={"dry_run": self._dry_run},
+            fitting_report=fitting_report,
         )
 
     # ------------------------------------------------------------------
@@ -188,6 +200,7 @@ class CompressorRunner:
                 "evaluator": MockEvaluator(),
                 "task": None,
                 "transformation_factory": None,
+                "semantic_backend": None,
             }
 
         from prompt_piper.backends.lm_eval import (
@@ -216,6 +229,7 @@ class CompressorRunner:
             "evaluator": evaluator,
             "task": task,
             "transformation_factory": factory,
+            "semantic_backend": semantic_backend,
         }
 
     def _get_dataset(
@@ -293,6 +307,88 @@ class CompressorRunner:
             transformation_ids=run_cfg.transformation_ids,
             verbose=False,
         )
+
+    def _run_fitting(
+        self,
+        run_cfg: RunConfig,
+        dataset: list[dict],
+        semantic_backend,
+    ) -> tuple[dict, dict]:
+        """Run :class:`DatasetVocabularyFitter` and return ``(fitted, report)``.
+
+        *fitted* is the ``{operator_id: Transformation}`` dict from
+        :meth:`~DatasetVocabularyFitter.fit_all`.  *report* is the human-readable
+        summary from :meth:`~DatasetVocabularyFitter.report`.
+
+        The *semantic_backend* (an :class:`LMEvalSemanticBackend` or ``None``)
+        is forwarded to the fitter so it can additionally discover structural
+        patterns (header formats, tag names, chunk separators) via the LLM when
+        ``use_llm_for_semantic=True``.  When ``None``, only corpus-based fitting
+        is performed.
+        """
+        from prompt_piper.transformations.fitting import DatasetVocabularyFitter
+
+        logger.info("Running DatasetVocabularyFitter on %d samples…", len(dataset))
+        fitter = DatasetVocabularyFitter(
+            dataset,
+            prompt_field=run_cfg.prompt_field,
+            seed=run_cfg.seed,
+            backend=semantic_backend,  # None → corpus-only; set → also LLM-backed
+        )
+        fitted = fitter.fit_all()
+        report = fitter.report()
+        logger.info(
+            "Fitting complete: %d operators fitted, %d new stopwords, "
+            "%d new abbreviations, %d new sections%s",
+            len(fitted),
+            len(report.get("stopwords", [])),
+            len(report.get("abbreviations", [])),
+            len(report.get("sections", [])),
+            (
+                f", {len(report.get('tag_names', []))} tag(s), "
+                f"separator={report.get('chunk_separator')!r}"
+                if "tag_names" in report else ""
+            ),
+        )
+        return fitted, report
+
+    def _compose_factory(self, fitted: dict, semantic_backend) -> Any:
+        """Return a transformation factory that merges fitted instances with the LLM backend.
+
+        Priority order for each operator class:
+
+        1. **O28 (ChunkCompression) with LLM backend** — the fitted instance
+           carries a corpus-discovered *separator*; the LLM backend handles
+           per-chunk compression.  Both are combined into a single instance.
+        2. **Any other fitted operator** — the fitted instance is returned
+           as-is (corpus-adapted, no LLM needed).
+        3. **Semantic operator with LLM backend** — instantiated with the
+           backend (heuristic fallback overridden by LLM).
+        4. **Everything else** — default no-arg constructor.
+        """
+        import inspect
+        from prompt_piper.transformations.semantic import ChunkCompression
+
+        def factory(cls):
+            fitted_inst = fitted.get(cls.id)
+
+            if fitted_inst is not None:
+                # O28: blend the fitted separator with the semantic backend.
+                if cls.id == "O28" and semantic_backend is not None:
+                    return ChunkCompression(
+                        backend=semantic_backend,
+                        separator=fitted_inst._separator,
+                    )
+                return fitted_inst
+
+            # Non-fitted semantic operator: inject the LLM backend.
+            if semantic_backend is not None and cls.category == "semantic":
+                if "backend" in inspect.signature(cls.__init__).parameters:
+                    return cls(backend=semantic_backend)
+
+            return cls()
+
+        return factory
 
     def _output_path(self, run_cfg: RunConfig) -> Path:
         out_dir = Path(self._config.output.dir)

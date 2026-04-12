@@ -29,6 +29,7 @@ YAML schema example
         - all_transformations
         - random_search
       use_llm_for_semantic: true
+      use_fitting: false                    # run DatasetVocabularyFitter before search
       algorithm: nsga2
       pop_size: 50
       n_gen: 100
@@ -97,6 +98,14 @@ class RunConfig:
         ]
     )
     use_llm_for_semantic: bool = True
+    #: Run :class:`~prompt_piper.transformations.fitting.DatasetVocabularyFitter`
+    #: on the search dataset before optimisation.  Corpus-based patterns (O3,
+    #: O5, O17, O18, O22) are always fitted when this is ``True``.  When
+    #: ``use_llm_for_semantic`` is also ``True``, the same LLM model is reused
+    #: to additionally discover structural patterns (O15, O28; header formats,
+    #: tag names, chunk separators).  The fitting report is persisted alongside
+    #: the optimisation result.
+    use_fitting: bool = False
     algorithm: str = "nsga2"
     pop_size: int = 50
     n_gen: int = 100
