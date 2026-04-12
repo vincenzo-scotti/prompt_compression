@@ -95,6 +95,9 @@ class CompressorResult:
     baselines: list[BaselineEval]
     generation_history: list[dict]
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Report produced by :class:`~prompt_piper.transformations.fitting.DatasetVocabularyFitter`
+    #: when ``use_fitting=True``.  ``None`` when fitting was not performed.
+    fitting_report: dict | None = None
 
     # ------------------------------------------------------------------
     # Serialisation

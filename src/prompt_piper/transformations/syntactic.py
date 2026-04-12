@@ -79,14 +79,30 @@ def _capitalise_first(s: str) -> str:
 
 
 class ImperativeRewrite(Transformation):
-    """O10 – Convert descriptive task framing to imperative form."""
+    """O10 – Convert descriptive task framing to imperative form.
+
+    Parameters
+    ----------
+    patterns:
+        List of ``(compiled_pattern, replacement)`` pairs applied in order.
+        Defaults to the built-in :data:`_IMPERATIVE_PATTERNS`.  Pass a
+        custom list (e.g. from
+        :meth:`~prompt_piper.transformations.fitting.DatasetVocabularyFitter.fit_imperative_rewrite`)
+        to add or replace dataset-specific framing patterns.
+    """
 
     id = "O10"
     name = "ImperativeRewrite"
     category = "syntactic"
 
+    def __init__(
+        self,
+        patterns: list[tuple[re.Pattern[str], str]] | None = None,
+    ) -> None:
+        self._patterns = patterns if patterns is not None else _IMPERATIVE_PATTERNS
+
     def apply(self, prompt: str) -> str:
-        for pattern, replacement in _IMPERATIVE_PATTERNS:
+        for pattern, replacement in self._patterns:
             prompt = pattern.sub(replacement, prompt)
         # Re-capitalise lines that lost their leading capital.
         lines = [_capitalise_first(line) if line else line for line in prompt.splitlines()]

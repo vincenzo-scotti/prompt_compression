@@ -51,15 +51,30 @@ _HEADER_LINE = re.compile(
 
 
 class RemovePromptHeader(Transformation):
-    """O15 – Remove section headers that add no task-relevant content."""
+    """O15 – Remove section headers that add no task-relevant content.
+
+    Parameters
+    ----------
+    patterns:
+        List of compiled patterns to match against each stripped line using
+        ``fullmatch``.  When *None* (default), only the built-in
+        ``_HEADER_LINE`` pattern is used.  Pass an explicit list to extend or
+        replace the default (e.g. from :meth:`DatasetVocabularyFitter.fit_prompt_header`).
+    """
 
     id = "O15"
     name = "RemovePromptHeader"
     category = "structural"
 
+    def __init__(self, patterns: list[re.Pattern[str]] | None = None) -> None:
+        self._patterns = patterns if patterns is not None else [_HEADER_LINE]
+
     def apply(self, prompt: str) -> str:
         lines = prompt.splitlines()
-        cleaned = [line for line in lines if not _HEADER_LINE.fullmatch(line.strip())]
+        cleaned = [
+            line for line in lines
+            if not any(p.fullmatch(line.strip()) for p in self._patterns)
+        ]
         return "\n".join(cleaned).strip()
 
 
@@ -169,6 +184,13 @@ def _build_section_pattern(heading: str) -> re.Pattern[str]:
     )
 
 
+def _build_tag_pattern(tag: str) -> re.Pattern[str]:
+    """Match an XML/HTML block ``<tag …>…</tag>`` including all content."""
+    t = re.escape(tag)
+    # [^>]* allows optional attributes; [\s\S]*? is lazy to avoid over-matching.
+    return re.compile(rf"<{t}[^>]*>[\s\S]*?</{t}>", re.I)
+
+
 class SectionPruning(Transformation):
     """O18 – Remove entire named sections from the prompt.
 
@@ -177,19 +199,32 @@ class SectionPruning(Transformation):
     sections:
         List of section heading keywords to remove (case-insensitive).
         Defaults to common low-value sections.
+    tag_names:
+        List of XML/HTML tag names whose entire block (opening tag, content,
+        and closing tag) should be removed — e.g. ``["instructions",
+        "context"]`` removes ``<instructions>…</instructions>`` blocks.
+        When *None* (default), no tag-based removal is applied.
     """
 
     id = "O18"
     name = "SectionPruning"
     category = "structural"
 
-    def __init__(self, sections: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        sections: list[str] | None = None,
+        tag_names: list[str] | None = None,
+    ) -> None:
         headings = sections if sections is not None else _DEFAULT_PRUNABLE_SECTIONS
         self._headings = list(headings)
         self._patterns = [_build_section_pattern(h) for h in headings]
+        self._tag_names = list(tag_names) if tag_names else []
+        self._tag_patterns = [_build_tag_pattern(t) for t in self._tag_names]
 
     def apply(self, prompt: str) -> str:
         for pattern in self._patterns:
+            prompt = pattern.sub("", prompt)
+        for pattern in self._tag_patterns:
             prompt = pattern.sub("", prompt)
         return prompt.strip()
 
@@ -267,19 +302,54 @@ class ExampleSubsetSelection(Transformation):
 # ---------------------------------------------------------------------------
 
 # Collapse verbose "Input: X\nOutput: Y" example blocks into "X → Y".
-_INPUT_OUTPUT_BLOCK = re.compile(
-    r"(?:Input|Question|Q)\s*:\s*(?P<inp>.+?)\n"
-    r"(?:Output|Answer|Label|Sentiment|A)\s*:\s*(?P<out>.+?)(?=\n\n|\n(?:Input|Question|Q)\s*:|\Z)",
-    re.I | re.S,
-)
+
+_DEFAULT_INPUT_MARKERS: list[str] = ["Input", "Question", "Q"]
+_DEFAULT_OUTPUT_MARKERS: list[str] = ["Output", "Answer", "Label", "Sentiment", "A"]
+
+
+def _build_io_pattern(
+    input_markers: list[str],
+    output_markers: list[str],
+) -> re.Pattern[str]:
+    """Compile a regex that matches input/output example blocks.
+
+    The lookahead is also built from *input_markers* so that the output
+    capture group stops correctly at the next example's opening line.
+    """
+    inp_alt = "|".join(re.escape(m) for m in input_markers)
+    out_alt = "|".join(re.escape(m) for m in output_markers)
+    return re.compile(
+        rf"(?:{inp_alt})\s*:\s*(?P<inp>.+?)\n"
+        rf"(?:{out_alt})\s*:\s*(?P<out>.+?)(?=\n\n|\n(?:{inp_alt})\s*:|\Z)",
+        re.I | re.S,
+    )
 
 
 class ExampleSimplification(Transformation):
-    """O21 – Compress verbose input/output examples into compact arrow notation."""
+    """O21 – Compress verbose input/output examples into compact arrow notation.
+
+    Parameters
+    ----------
+    input_markers:
+        Words used as the input-side field label (e.g. ``"Input"``,
+        ``"Question"``).  Defaults to :data:`_DEFAULT_INPUT_MARKERS`.
+    output_markers:
+        Words used as the output-side field label (e.g. ``"Output"``,
+        ``"Answer"``).  Defaults to :data:`_DEFAULT_OUTPUT_MARKERS`.
+    """
 
     id = "O21"
     name = "ExampleSimplification"
     category = "structural"
+
+    def __init__(
+        self,
+        input_markers: list[str] | None = None,
+        output_markers: list[str] | None = None,
+    ) -> None:
+        self._input_markers = input_markers if input_markers is not None else list(_DEFAULT_INPUT_MARKERS)
+        self._output_markers = output_markers if output_markers is not None else list(_DEFAULT_OUTPUT_MARKERS)
+        self._pattern = _build_io_pattern(self._input_markers, self._output_markers)
 
     def apply(self, prompt: str) -> str:
         def _compress(m: re.Match[str]) -> str:
@@ -287,7 +357,7 @@ class ExampleSimplification(Transformation):
             out = m.group("out").strip().replace("\n", " ")
             return f"{inp} → {out}"
 
-        return _INPUT_OUTPUT_BLOCK.sub(_compress, prompt)
+        return self._pattern.sub(_compress, prompt)
 
 
 # ---------------------------------------------------------------------------
