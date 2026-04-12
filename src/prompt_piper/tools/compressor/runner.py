@@ -276,8 +276,8 @@ class CompressorRunner:
             {
                 # Full formatted prompt (template + simulated few-shot context)
                 "prompt": contexts[i % len(contexts)] + templates[i % len(templates)],
-                # Raw 0-shot template (no few-shot examples)
-                "prompt_template": templates[i % len(templates)],
+                # 0-shot prompt (no few-shot examples prepended)
+                "prompt_0shot": templates[i % len(templates)],
                 "target": "positive" if i % 2 == 0 else "negative",
             }
             for i in range(n)

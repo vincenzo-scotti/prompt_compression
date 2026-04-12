@@ -15,6 +15,7 @@ import re
 from typing import Callable
 
 from .base import Transformation, _ensure_nltk_resource
+from .structural import _EXAMPLE_BLOCK as _EXAMPLE_BLOCK_PATTERN  # shared definition
 
 Backend = Callable[[str, str], str]
 
@@ -71,7 +72,11 @@ class ContextCompression(Transformation):
 
     def _compress_paragraph(self, para: str) -> str:
         if self.backend is not None:
-            return self.backend(para, "Summarise this passage in one concise sentence.")
+            return self.backend(
+                para,
+                "Summarise this passage in one concise sentence. "
+                "Return only the sentence — no preamble, no explanation.",
+            )
         return _first_sentence(para)
 
     def apply(self, prompt: str) -> str:
@@ -122,7 +127,11 @@ class InstructionSummarization(Transformation):
 
     def _summarise(self, text: str) -> str:
         if self.backend is not None:
-            return self.backend(text, "Summarise this instruction in one sentence.")
+            return self.backend(
+                text,
+                "Summarise this instruction in one sentence. "
+                "Return only the sentence — no preamble, no explanation.",
+            )
         return _first_sentence(text)
 
     def apply(self, prompt: str) -> str:
@@ -150,9 +159,9 @@ class InstructionSummarization(Transformation):
 # The heuristic version collapses bullet-point rule sets into one sentence.
 
 _RULE_BLOCK = re.compile(
-    r"(?P<header>[^\n]+:\n)"
-    r"(?P<items>(?:[ \t]*[-*•\d.]+[ \t]+[^\n]+\n?){2,})",
-    re.I,
+    r"(?P<header>^[^\n]+:\n)"
+    r"(?P<items>(?:[ \t]*[-*•\d.)]+[ \t]+[^\n]+\n?){2,})",
+    re.I | re.M,
 )
 
 _DEFAULT_ABSTRACTION = "Follow the guidelines above."
@@ -183,7 +192,11 @@ class InstructionAbstraction(Transformation):
 
     def _abstract(self, header: str, items: str) -> str:
         if self.backend is not None:
-            return self.backend(header + items, "Replace these rules with one abstract guideline.")
+            return self.backend(
+                header + items,
+                "Replace these rules with one abstract guideline. "
+                "Return only the guideline text — no preamble, no explanation.",
+            )
         return self._abstraction
 
     def apply(self, prompt: str) -> str:
@@ -239,21 +252,13 @@ class SchemaEncoding(Transformation):
 
     def apply(self, prompt: str) -> str:
         for pattern, replacement in _OUTPUT_FORMAT_PATTERNS:
-            if callable(replacement):
-                prompt = pattern.sub(replacement, prompt)
-            else:
-                prompt = pattern.sub(replacement, prompt)
+            prompt = pattern.sub(replacement, prompt)
         return prompt
 
 
 # ---------------------------------------------------------------------------
 # O27 – ExampleDistillation
 # ---------------------------------------------------------------------------
-
-_EXAMPLE_BLOCK_PATTERN = re.compile(
-    r"(?:^(?:Example\s*\d*\s*:|Input\s*:|Q\s*:)[^\n]*\n(?:[^\n]+\n?)*?)(?=\n\n|\Z)",
-    re.I | re.M,
-)
 
 _DEFAULT_RULE_TEMPLATE = "Rule: classify according to the patterns shown above."
 
@@ -289,7 +294,8 @@ class ExampleDistillation(Transformation):
         if self.backend is not None:
             return self.backend(
                 examples_text,
-                "Distil these examples into a single generalised rule.",
+                "Distil these examples into a single generalised rule. "
+                "Return only the rule text — no preamble, no explanation.",
             )
         return self._rule_template
 
@@ -345,7 +351,11 @@ class ChunkCompression(Transformation):
 
     def _compress_chunk(self, chunk: str) -> str:
         if self.backend is not None:
-            return self.backend(chunk, "Compress this text as much as possible.")
+            return self.backend(
+                chunk,
+                "Compress this text as much as possible while preserving meaning. "
+                "Return only the compressed text — no preamble, no explanation.",
+            )
         result = chunk
         for transform in self._sub_pipeline:
             result = transform(result)
