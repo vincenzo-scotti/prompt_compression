@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from .base import Transformation
+from .base import Transformation, _ensure_nltk_resource
 
 # ---------------------------------------------------------------------------
 # O14 – DeduplicateInstructions
@@ -29,7 +29,10 @@ class DeduplicateInstructions(Transformation):
         self._threshold = similarity_threshold
 
     def apply(self, prompt: str) -> str:
-        sentences = re.split(r"(?<=[.!?])\s+", prompt)
+        _ensure_nltk_resource("tokenizers/punkt_tab", "punkt_tab")
+        from nltk.tokenize import sent_tokenize
+
+        sentences = sent_tokenize(prompt)
         kept: list[str] = []
         for sentence in sentences:
             if not any(_sentence_similarity(sentence, k) >= self._threshold for k in kept):

@@ -49,7 +49,8 @@ def _words(text: str) -> list[str]:
 
 
 def _ngrams(tokens: list[str], n: int) -> list[tuple[str, ...]]:
-    return [tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1)]
+    from nltk.util import ngrams
+    return list(ngrams(tokens, n))
 
 
 def _doc_frequencies(sequences: list[list[tuple]]) -> Counter:
@@ -361,11 +362,10 @@ class DatasetVocabularyFitter:
         for t in self._get_targets():
             target_word_freq.update(_words(t))
 
-        # Remove very short or extremely common words
-        _common = {"the", "a", "an", "is", "in", "of", "to", "and", "or", "it"}
+        # Filter out stopwords (uses NLTK list via _STOPWORDS) and very short words.
         anchors = [
-            w for w, _ in target_word_freq.most_common(top_k + len(_common))
-            if w not in _common and len(w) >= 3
+            w for w, _ in target_word_freq.most_common(top_k + len(_STOPWORDS))
+            if w not in _STOPWORDS and len(w) >= 3
         ][:top_k]
 
         return ContextPruning(anchor_terms=anchors if anchors else None)
