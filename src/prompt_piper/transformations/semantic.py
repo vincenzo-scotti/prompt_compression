@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-from .base import Transformation
+from .base import Transformation, _ensure_nltk_resource
 
 Backend = Callable[[str, str], str]
 
@@ -28,8 +28,11 @@ def _split_paragraphs(text: str) -> list[str]:
 
 def _first_sentence(text: str) -> str:
     """Return the first sentence of *text*, or the whole text if none found."""
-    m = re.match(r"[^.!?]+[.!?]", text)
-    return m.group(0).strip() if m else text.strip()
+    _ensure_nltk_resource("tokenizers/punkt_tab", "punkt_tab")
+    from nltk.tokenize import sent_tokenize
+
+    sentences = sent_tokenize(text)
+    return sentences[0].strip() if sentences else text.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -74,8 +77,11 @@ class ContextCompression(Transformation):
     def apply(self, prompt: str) -> str:
         paragraphs = _split_paragraphs(prompt)
         result: list[str] = []
+        _ensure_nltk_resource("tokenizers/punkt_tab", "punkt_tab")
+        from nltk.tokenize import sent_tokenize
+
         for para in paragraphs:
-            sentences = re.findall(r"[^.!?]+[.!?]", para)
+            sentences = sent_tokenize(para)
             should_compress = (
                 (self._marker and self._marker.search(para))
                 or (not self._marker and len(sentences) >= self._min_sentences)

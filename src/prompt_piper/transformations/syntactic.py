@@ -7,25 +7,22 @@ from __future__ import annotations
 
 import re
 
-from .base import Transformation
+from .base import Transformation, _ensure_nltk_resource
 
 # ---------------------------------------------------------------------------
 # O9 – SentenceMerge
 # ---------------------------------------------------------------------------
 
-# Simple heuristic: merge pairs of short consecutive sentences separated by
-# a full stop + space into a single sentence joined by "; ".
-# Only split on "." (full stop), not "?" or "!", to avoid breaking
-# question-answer pairs inside few-shot examples.  Use " +" (space only,
-# not \s+) so newlines inside a paragraph are not treated as sentence
-# boundaries.
-_SENTENCE_SPLIT = re.compile(r"(?<=\.) +(?=[A-Z])")
-
 _SHORT_SENTENCE_THRESHOLD = 10  # words
 
 
 class SentenceMerge(Transformation):
-    """O9 – Merge adjacent short sentences into a single sentence."""
+    """O9 – Merge adjacent short sentences into a single sentence.
+
+    Sentence boundaries are detected with NLTK's Punkt tokenizer, which
+    correctly handles abbreviations (e.g. "Dr.", "U.S.") and decimal numbers
+    that would otherwise confuse a simple period-based regex split.
+    """
 
     id = "O9"
     name = "SentenceMerge"
@@ -35,7 +32,10 @@ class SentenceMerge(Transformation):
         self._max_words = max_words
 
     def apply(self, prompt: str) -> str:
-        sentences = _SENTENCE_SPLIT.split(prompt)
+        _ensure_nltk_resource("tokenizers/punkt_tab", "punkt_tab")
+        from nltk.tokenize import sent_tokenize
+
+        sentences = sent_tokenize(prompt)
         merged: list[str] = []
         i = 0
         while i < len(sentences):

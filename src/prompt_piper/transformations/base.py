@@ -3,6 +3,15 @@ from __future__ import annotations
 import abc
 
 
+def _ensure_nltk_resource(resource: str, package: str) -> None:
+    """Download *package* if the NLTK *resource* path is not found locally."""
+    import nltk
+    try:
+        nltk.data.find(resource)
+    except LookupError:
+        nltk.download(package, quiet=True)
+
+
 class Transformation(abc.ABC):
     """Base class for all prompt transformations.
 

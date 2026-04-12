@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 
-from .base import Transformation
+from .base import Transformation, _ensure_nltk_resource
 
 # ---------------------------------------------------------------------------
 # O1 – RemoveExtraWhitespace
@@ -62,28 +62,38 @@ class TrimSpaces(Transformation):
 # O3 – RemoveStopwords
 # ---------------------------------------------------------------------------
 
-# Minimal English stopword list focused on words that rarely carry task-critical
-# meaning in prompts.  Deliberately conservative to avoid mangling instructions.
-_STOPWORDS: frozenset[str] = frozenset(
-    {
-        "a", "an", "the",
-        "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had",
-        "do", "does", "did",
-        "will", "would", "could", "should", "may", "might", "shall",
-        "of", "in", "on", "at", "to", "for", "with", "by", "from",
-        "that", "this", "these", "those",
-        "it", "its",
-        "i", "we", "you", "he", "she", "they",
-        "me", "us", "him", "her", "them",
-        "my", "our", "your", "his", "their",
-        "which", "who", "whom",
-        "also", "just", "very", "quite", "rather",
-    }
-)
+def _load_stopwords() -> frozenset[str]:
+    """Return the NLTK English stopword list, downloading it if needed.
 
-_WORD_RE = re.compile(r"\b\w+\b")
+    Falls back to a small built-in set when NLTK data cannot be obtained
+    (e.g. in air-gapped environments).
+    """
+    try:
+        _ensure_nltk_resource("corpora/stopwords", "stopwords")
+        from nltk.corpus import stopwords
+        return frozenset(stopwords.words("english"))
+    except Exception:
+        # Minimal fallback so the transformation still works without NLTK data.
+        return frozenset(
+            {
+                "a", "an", "the",
+                "is", "are", "was", "were", "be", "been", "being",
+                "have", "has", "had",
+                "do", "does", "did",
+                "will", "would", "could", "should", "may", "might", "shall",
+                "of", "in", "on", "at", "to", "for", "with", "by", "from",
+                "that", "this", "these", "those",
+                "it", "its",
+                "i", "we", "you", "he", "she", "they",
+                "me", "us", "him", "her", "them",
+                "my", "our", "your", "his", "their",
+                "which", "who", "whom",
+                "also", "just", "very", "quite", "rather",
+            }
+        )
 
+
+_STOPWORDS: frozenset[str] = _load_stopwords()
 
 class RemoveStopwords(Transformation):
     """O3 – Remove non-essential function words."""
