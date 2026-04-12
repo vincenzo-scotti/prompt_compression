@@ -115,7 +115,7 @@ class RunConfig:
     prompt_field: str = "prompt"
     #: Field to apply transformations to.  ``None`` means use ``prompt_field``
     #: (i.e. compress the fully formatted prompt).  Set to
-    #: ``"prompt_template"`` to compress only the 0-shot template.
+    #: ``"prompt_0shot"`` to compress only the 0-shot prompt.
     compress_field: str | None = None
 
     @property

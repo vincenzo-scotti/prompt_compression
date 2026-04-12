@@ -40,9 +40,9 @@ class PromptCompressionProblem(Problem):
     compress_field:
         Key inside each sample dict to apply transformations to.  When
         ``None`` (default) falls back to ``prompt_field``.  Setting this to
-        a different field (e.g. ``"prompt_template"``) lets you compress a
-        template/0-shot prompt while keeping the full formatted prompt in
-        ``prompt_field`` for any downstream use.  Token counts and evaluator
+        a different field (e.g. ``"prompt_0shot"``) lets you compress the
+        0-shot prompt while keeping the full formatted prompt (with any
+        few-shot examples) in ``prompt_field``.  Token counts and evaluator
         calls both operate on the compressed value of this field.
     """
 

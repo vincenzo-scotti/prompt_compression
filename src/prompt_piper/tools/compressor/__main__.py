@@ -121,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Dataset field to apply transformations to.  "
             "Omit (default) to compress the fully formatted prompt.  "
-            "Pass 'prompt_template' to compress only the 0-shot template "
+            "Pass 'prompt_0shot' to compress only the 0-shot prompt "
             "(few-shot examples are excluded from compression)."
         ),
     )

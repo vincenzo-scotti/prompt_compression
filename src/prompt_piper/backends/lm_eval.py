@@ -133,10 +133,12 @@ class LMEvalDataset:
     prompt_field:
         Key used for the full (few-shot) prompt in the output dict.
     template_field:
-        When set, each sample also gets a ``template_field`` key containing
-        the 0-shot prompt (i.e. ``fewshot_context(doc, 0)``).  Pass this
-        field name as ``compress_field`` in :class:`ExperimentConfig` to
-        compress the raw template instead of the full formatted prompt.
+        When set, each sample also gets an entry under this key containing
+        the 0-shot prompt (i.e. ``fewshot_context(doc, 0)`` — the prompt
+        with data already substituted but no few-shot examples prepended).
+        Use ``"prompt_0shot"`` as the conventional name and pass it as
+        ``compress_field`` in :class:`ExperimentConfig` to compress that
+        field instead of the full formatted prompt.
     """
 
     def __init__(

@@ -40,9 +40,9 @@ class ExperimentConfig:
     # --- Dataset ---
     prompt_field: str = "prompt"
     #: Field to apply transformations to.  When ``None`` (default) falls back
-    #: to ``prompt_field``.  Set to ``"prompt_template"`` (and ensure samples
-    #: carry that key) to compress the raw template instead of the fully
-    #: formatted prompt.
+    #: to ``prompt_field``.  Set to ``"prompt_0shot"`` (and ensure samples
+    #: carry that key) to compress the 0-shot prompt instead of the fully
+    #: formatted prompt (which may include few-shot examples).
     compress_field: str | None = None
     target_field: str | None = "target"
     n_subset: int | None = 100
