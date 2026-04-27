@@ -727,6 +727,7 @@ class LMEvalBackend:
         transformations: list[type[Transformation]] | None = None,
         use_llm_for_semantic: bool = True,
         tokenizer: Tokenizer | None = None,
+        transformation_factory=None,
     ):
         """Return a fully configured :class:`~prompt_piper.optimization.runner.Experiment`.
 
@@ -743,7 +744,8 @@ class LMEvalBackend:
         use_llm_for_semantic:
             If ``True`` (default), semantic transformations (O23–O28) are
             instantiated with the LLM backend.  If ``False``, the heuristic
-            fallbacks are used.
+            fallbacks are used.  Ignored when ``transformation_factory`` is
+            provided.
         tokenizer:
             :class:`~prompt_piper.optimization.tokenizer.Tokenizer` used to
             count tokens in the compressed prompt.  Defaults to
@@ -752,6 +754,13 @@ class LMEvalBackend:
             models; ``tiktoken`` for OpenAI models).  Pass an explicit
             tokenizer to override, or ``False`` to fall back to the
             :class:`~prompt_piper.optimization.tokenizer.WhitespaceTokenizer`.
+        transformation_factory:
+            Optional callable ``(cls: type[Transformation]) -> Transformation``
+            that overrides the internal factory.  Use this to inject a
+            :class:`~prompt_piper.transformations.fitting.DatasetVocabularyFitter`
+            factory (combined with LLM backend injection for semantic operators
+            as needed).  When ``None`` (default), the internal factory derived
+            from ``use_llm_for_semantic`` is used.
 
         Notes
         -----
@@ -774,7 +783,11 @@ class LMEvalBackend:
             template_field=template_field,
         ).as_list()
 
-        factory = self._make_transformation_factory(use_llm_for_semantic)
+        factory = (
+            transformation_factory
+            if transformation_factory is not None
+            else self._make_transformation_factory(use_llm_for_semantic)
+        )
 
         # Resolve tokenizer: use model-native by default, allow explicit override.
         if tokenizer is False:
