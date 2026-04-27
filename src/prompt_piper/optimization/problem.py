@@ -88,17 +88,20 @@ class PromptCompressionProblem(Problem):
 
     def _score_pipeline(self, pipeline: list[Transformation]) -> tuple[float, float]:
         """Return (avg_tokens, avg_performance) for *pipeline* on the dataset."""
-        total_tokens = 0.0
-        total_perf = 0.0
-        for sample in self._dataset:
-            original: str = sample[self._compress_field]
-            compressed = original
+        originals = [s[self._compress_field] for s in self._dataset]
+
+        compressed_texts: list[str] = []
+        for original in originals:
+            text = original
             for transform in pipeline:
-                compressed = transform(compressed)
-            total_tokens += self._tokenizer.count(compressed)
-            total_perf += self._evaluator.evaluate(original, compressed, sample)
+                text = transform(text)
+            compressed_texts.append(text)
+
+        total_tokens = sum(self._tokenizer.count(c) for c in compressed_texts)
+        perfs = self._evaluator.evaluate_batch(originals, compressed_texts, self._dataset)
+
         n = len(self._dataset)
-        return total_tokens / n, total_perf / n
+        return total_tokens / n, sum(perfs) / n
 
     def score_solution(self, bits: np.ndarray) -> tuple[float, float]:
         """Publicly exposed single-solution scorer (useful for baselines).

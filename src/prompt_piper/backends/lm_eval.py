@@ -452,6 +452,21 @@ class LMEvalEvaluator(Evaluator):
             return self._eval_multiple_choice(compressed, doc)
         return self._eval_generation(compressed, doc)
 
+    def evaluate_batch(
+        self,
+        originals: list[str],
+        compresseds: list[str],
+        samples: list[dict],
+    ) -> list[float]:
+        """Score a batch of compressed prompts in a single model call."""
+        if not samples:
+            return []
+
+        output_type = getattr(self._task, "OUTPUT_TYPE", "generate_until")
+        if output_type in ("multiple_choice", "loglikelihood"):
+            return self._eval_multiple_choice_batch(compresseds, samples)
+        return self._eval_generation_batch(compresseds, samples)
+
     # ------------------------------------------------------------------
     # Strategy implementations
     # ------------------------------------------------------------------
@@ -479,6 +494,43 @@ class LMEvalEvaluator(Evaluator):
         # String: compare to the predicted choice text.
         return 1.0 if choices[predicted] == gold else 0.0
 
+    def _eval_multiple_choice_batch(
+        self, prompts: list[str], samples: list[dict]
+    ) -> list[float]:
+        """Batched loglikelihood scoring: one model call for all samples."""
+        first_doc = samples[0].get("_doc")
+        try:
+            self._task.doc_to_choice(first_doc)
+        except AttributeError:
+            return self._eval_generation_batch(prompts, samples)
+
+        requests = []
+        choices_counts: list[int] = []
+        for prompt, sample in zip(prompts, samples):
+            doc = sample.get("_doc")
+            choices = self._task.doc_to_choice(doc)
+            choices_counts.append(len(choices))
+            for i, choice in enumerate(choices):
+                requests.append(_make_instance("loglikelihood", doc, (prompt, choice), i))
+
+        results = _call_model(self._model, "loglikelihood", requests)
+
+        scores: list[float] = []
+        idx = 0
+        for n_choices, sample in zip(choices_counts, samples):
+            chunk = results[idx : idx + n_choices]
+            idx += n_choices
+            log_probs = [r[0] if isinstance(r, (tuple, list)) else r for r in chunk]
+            predicted = int(np.argmax(log_probs))
+            doc = sample.get("_doc")
+            gold = self._task.doc_to_target(doc)
+            choices = self._task.doc_to_choice(doc)
+            if isinstance(gold, int):
+                scores.append(1.0 if predicted == gold else 0.0)
+            else:
+                scores.append(1.0 if choices[predicted] == gold else 0.0)
+        return scores
+
     def _eval_generation(self, prompt: str, doc) -> float:
         """Generation-based scoring for open-ended tasks."""
         instance = _make_instance("generate_until", doc, (prompt, self._gen_kwargs), 0)
@@ -492,6 +544,35 @@ class LMEvalEvaluator(Evaluator):
         except Exception as exc:
             logger.warning("LMEvalEvaluator: process_results failed (%s); returning 0.0", exc)
             return 0.0
+
+    def _eval_generation_batch(
+        self, prompts: list[str], samples: list[dict]
+    ) -> list[float]:
+        """Batched generation scoring: one model call for all samples."""
+        requests = [
+            _make_instance(
+                "generate_until",
+                sample.get("_doc", {}),
+                (prompt, self._gen_kwargs),
+                i,
+            )
+            for i, (prompt, sample) in enumerate(zip(prompts, samples))
+        ]
+        generated_texts = _call_model(self._model, "generate_until", requests)
+
+        scores: list[float] = []
+        for generated, sample in zip(generated_texts, samples):
+            doc = sample.get("_doc")
+            try:
+                metrics: dict = self._task.process_results(doc, [generated])
+                value = float(next(iter(metrics.values())))
+                scores.append(max(0.0, min(1.0, value)))
+            except Exception as exc:
+                logger.warning(
+                    "LMEvalEvaluator: process_results failed (%s); returning 0.0", exc
+                )
+                scores.append(0.0)
+        return scores
 
 
 # ---------------------------------------------------------------------------

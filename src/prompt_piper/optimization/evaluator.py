@@ -28,6 +28,22 @@ class Evaluator(abc.ABC):
     def evaluate(self, original: str, compressed: str, sample: dict) -> float:
         """Return a performance score in [0, 1]."""
 
+    def evaluate_batch(
+        self,
+        originals: list[str],
+        compresseds: list[str],
+        samples: list[dict],
+    ) -> list[float]:
+        """Score a batch of compressed prompts.
+
+        Default implementation calls :meth:`evaluate` in a loop.  Subclasses
+        should override this to exploit model-level batching.
+        """
+        return [
+            self.evaluate(o, c, s)
+            for o, c, s in zip(originals, compresseds, samples)
+        ]
+
     def __call__(self, original: str, compressed: str, sample: dict) -> float:
         return self.evaluate(original, compressed, sample)
 
