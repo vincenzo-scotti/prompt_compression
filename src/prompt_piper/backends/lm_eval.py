@@ -55,7 +55,25 @@ def _load_model(model_type: str, model_name: str, **kwargs):
     _require_lm_eval()
     if model_type in ("hf", "huggingface"):
         from lm_eval.models.huggingface import HFLM
-        return HFLM(pretrained=model_name, **kwargs)
+        quantization_config = kwargs.pop("quantization_config", None)
+        if quantization_config is not None:
+            # lm-eval bug: HFLM.__init__ reads quantization_config from the HF
+            # model config and passes it explicitly to _create_model(**kwargs),
+            # so a user-supplied quantization_config in **kwargs ends up
+            # duplicated. Workaround: pre-load the model and hand the object to
+            # HFLM, which skips _create_model when pretrained is not a string.
+            from transformers import AutoModelForCausalLM
+            pretrained = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                quantization_config=quantization_config,
+                device_map=kwargs.pop("device_map", "auto"),
+                trust_remote_code=kwargs.get("trust_remote_code", False),
+                revision=kwargs.get("revision", "main"),
+                torch_dtype=kwargs.get("dtype", "auto"),
+            )
+        else:
+            pretrained = model_name
+        return HFLM(pretrained=pretrained, **kwargs)
     if model_type == "openai":
         from lm_eval.models.openai_completions import OpenAICompletionsLM
         return OpenAICompletionsLM(model=model_name, **kwargs)
