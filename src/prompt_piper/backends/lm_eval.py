@@ -504,20 +504,29 @@ class LMEvalEvaluator(Evaluator):
         except AttributeError:
             return self._eval_generation_batch(prompts, samples)
 
+        # Empty prompts (fully compressed away) cannot be tokenised; score 0.
+        scores: list[float] = [0.0] * len(prompts)
+        valid = [(i, p, s) for i, (p, s) in enumerate(zip(prompts, samples)) if p.strip()]
+        if not valid:
+            return scores
+
         requests = []
         choices_counts: list[int] = []
-        for prompt, sample in zip(prompts, samples):
+        valid_indices: list[int] = []
+        for orig_i, prompt, sample in valid:
             doc = sample.get("_doc")
             choices = self._task.doc_to_choice(doc)
             choices_counts.append(len(choices))
+            valid_indices.append(orig_i)
             for i, choice in enumerate(choices):
                 requests.append(_make_instance("loglikelihood", doc, (prompt, choice), i))
 
         results = _call_model(self._model, "loglikelihood", requests)
 
-        scores: list[float] = []
         idx = 0
-        for n_choices, sample in zip(choices_counts, samples):
+        for orig_i, n_choices, (_, _, sample) in zip(
+            valid_indices, choices_counts, valid
+        ):
             chunk = results[idx : idx + n_choices]
             idx += n_choices
             log_probs = [r[0] if isinstance(r, (tuple, list)) else r for r in chunk]
@@ -526,9 +535,9 @@ class LMEvalEvaluator(Evaluator):
             gold = self._task.doc_to_target(doc)
             choices = self._task.doc_to_choice(doc)
             if isinstance(gold, int):
-                scores.append(1.0 if predicted == gold else 0.0)
+                scores[orig_i] = 1.0 if predicted == gold else 0.0
             else:
-                scores.append(1.0 if choices[predicted] == gold else 0.0)
+                scores[orig_i] = 1.0 if choices[predicted] == gold else 0.0
         return scores
 
     def _eval_generation(self, prompt: str, doc) -> float:
@@ -549,6 +558,14 @@ class LMEvalEvaluator(Evaluator):
         self, prompts: list[str], samples: list[dict]
     ) -> list[float]:
         """Batched generation scoring: one model call for all samples."""
+        # Empty prompts (fully compressed away) produce a zero-length token
+        # tensor, causing an IndexError in HFLM._model_generate when it
+        # accesses attention_mask[:, -1].  Skip them and return 0.0.
+        scores: list[float] = [0.0] * len(prompts)
+        valid = [(i, p, s) for i, (p, s) in enumerate(zip(prompts, samples)) if p.strip()]
+        if not valid:
+            return scores
+
         requests = [
             _make_instance(
                 "generate_until",
@@ -556,22 +573,20 @@ class LMEvalEvaluator(Evaluator):
                 (prompt, self._gen_kwargs),
                 i,
             )
-            for i, (prompt, sample) in enumerate(zip(prompts, samples))
+            for i, (_, prompt, sample) in enumerate(valid)
         ]
         generated_texts = _call_model(self._model, "generate_until", requests)
 
-        scores: list[float] = []
-        for generated, sample in zip(generated_texts, samples):
+        for (orig_i, _, sample), generated in zip(valid, generated_texts):
             doc = sample.get("_doc")
             try:
                 metrics: dict = self._task.process_results(doc, [generated])
                 value = float(next(iter(metrics.values())))
-                scores.append(max(0.0, min(1.0, value)))
+                scores[orig_i] = max(0.0, min(1.0, value))
             except Exception as exc:
                 logger.warning(
                     "LMEvalEvaluator: process_results failed (%s); returning 0.0", exc
                 )
-                scores.append(0.0)
         return scores
 
 
