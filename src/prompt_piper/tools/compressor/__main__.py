@@ -75,6 +75,13 @@ def _build_parser() -> argparse.ArgumentParser:
     model.add_argument("--model-arg", metavar="KEY=VALUE", action="append",
                        dest="model_args", default=[],
                        help="Extra model kwargs, e.g. --model-arg device=cuda (repeatable)")
+    model.add_argument("--apply-chat-template", action="store_true",
+                       help="Apply the model's chat template to prompts "
+                            "(required for instruct/chat models)")
+    model.add_argument("--extra-stop-sequence", metavar="SEQ", action="append",
+                       dest="extra_stop_sequences", default=[],
+                       help="Additional stop token appended to the task's until list "
+                            "(repeatable). E.g. --extra-stop-sequence '<|eot_id|>'")
 
     # ---- Task / dataset ----------------------------------------------------
     task = p.add_argument_group("task / dataset")
@@ -155,13 +162,19 @@ def _parse_model_args(raw: list[str]) -> dict:
                 f"--model-arg must be KEY=VALUE, got: {item!r}"
             )
         k, v = item.split("=", 1)
-        # Best-effort type coercion
-        for cast in (int, float, lambda x: x):
-            try:
-                result[k.strip()] = cast(v.strip())
-                break
-            except (ValueError, TypeError):
-                continue
+        k, v = k.strip(), v.strip()
+        # Best-effort type coercion: bool → int → float → str
+        if v.lower() == "true":
+            result[k] = True
+        elif v.lower() == "false":
+            result[k] = False
+        else:
+            for cast in (int, float, lambda x: x):
+                try:
+                    result[k] = cast(v)
+                    break
+                except (ValueError, TypeError):
+                    continue
     return result
 
 
@@ -192,6 +205,8 @@ def _build_config(args: argparse.Namespace) -> CompressorConfig:
         cfg.model.name = args.model_name
     if args.model_args:
         cfg.model.kwargs.update(_parse_model_args(args.model_args))
+    if args.apply_chat_template:
+        cfg.model.kwargs["apply_chat_template"] = True
 
     # --- Output ---
     if args.output_dir:
@@ -217,6 +232,7 @@ def _build_config(args: argparse.Namespace) -> CompressorConfig:
             False if args.no_llm_semantic else None
         ),
         "compress_field": args.compress_field,
+        "extra_stop_sequences": args.extra_stop_sequences or None,
     }
     cfg = cfg.apply_cli_overrides(run_overrides)
 
