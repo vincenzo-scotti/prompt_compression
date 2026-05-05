@@ -8,10 +8,11 @@ YAML schema example
 
     model:
       type: hf                              # hf | openai | vllm
-      name: mistralai/Mistral-7B-v0.1
+      name: mistralai/Mistral-7B-Instruct-v0.3
       kwargs:                               # forwarded to model constructor
         device: cuda
         dtype: float16
+        apply_chat_template: true           # set true for instruct/chat models
 
     output:
       dir: ./results                        # output directory
@@ -30,6 +31,8 @@ YAML schema example
         - random_search
       use_llm_for_semantic: true
       use_fitting: false                    # run DatasetVocabularyFitter before search
+      generation_kwargs: null               # null = use task's own generation config
+      extra_stop_sequences: null            # e.g. ["<|eot_id|>"] for Llama-3
       algorithm: nsga2
       pop_size: 50
       n_gen: 100
@@ -117,6 +120,15 @@ class RunConfig:
     #: (i.e. compress the fully formatted prompt).  Set to
     #: ``"prompt_0shot"`` to compress only the 0-shot prompt.
     compress_field: str | None = None
+    #: Override generation kwargs passed to :class:`~prompt_piper.backends.lm_eval.LMEvalEvaluator`.
+    #: ``None`` (default) reads the task's own ``generation_kwargs`` config, which is
+    #: correct for most tasks (e.g. GSM8K ships with ``until: ["Question:", ...]``).
+    generation_kwargs: dict | None = None
+    #: Model-specific stop tokens appended to the task's ``until`` list.
+    #: Use this instead of overriding ``generation_kwargs`` when you only need
+    #: to add a model's EOT token (e.g. ``["<|eot_id|>"]`` for Llama-3,
+    #: ``["<|im_end|>"]`` for Qwen, ``"<|end|>"`` for Phi-3).
+    extra_stop_sequences: list[str] | None = None
 
     @property
     def run_name(self) -> str:

@@ -429,13 +429,32 @@ class LMEvalEvaluator(Evaluator):
         model,
         task,
         generation_kwargs: dict | None = None,
+        extra_stop_sequences: list[str] | None = None,
     ) -> None:
         self._model = model
         self._task = task
-        self._gen_kwargs = generation_kwargs or {
-            "until": ["\n", "\n\n"],
-            "max_gen_toks": 64,
-        }
+        if generation_kwargs is not None:
+            self._gen_kwargs = generation_kwargs
+        else:
+            # Use the task's own generation_kwargs (e.g. GSM8K ships with
+            # until=["Question:", "</s>"] which is needed for CoT generation).
+            # Fall back to a conservative newline stop only when the task has
+            # no config (e.g. legacy tasks or mocks).
+            cfg = getattr(task, "config", None)
+            task_kwargs = dict(getattr(cfg, "generation_kwargs", None) or {})
+            task_kwargs.setdefault("max_gen_toks", 256)
+            if not task_kwargs.get("until"):
+                task_kwargs["until"] = ["\n", "\n\n"]
+            self._gen_kwargs = task_kwargs
+
+        # Merge model-specific stop tokens (e.g. "<|eot_id|>" for Llama-3)
+        # into the until list without disturbing other generation kwargs.
+        if extra_stop_sequences:
+            until = list(self._gen_kwargs.get("until", []))
+            for seq in extra_stop_sequences:
+                if seq not in until:
+                    until.append(seq)
+            self._gen_kwargs = {**self._gen_kwargs, "until": until}
 
     def evaluate(self, original: str, compressed: str, sample: dict) -> float:
         doc = sample.get("_doc")

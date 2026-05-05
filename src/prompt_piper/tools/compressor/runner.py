@@ -214,7 +214,11 @@ class CompressorRunner:
 
         model = self._get_model()
         task = _load_task(run_cfg.task, num_fewshot=run_cfg.num_fewshot)
-        evaluator = LMEvalEvaluator(model, task)
+        evaluator = LMEvalEvaluator(
+            model, task,
+            generation_kwargs=run_cfg.generation_kwargs,
+            extra_stop_sequences=run_cfg.extra_stop_sequences,
+        )
         tokenizer = LMEvalTokenizer(model)
         semantic_backend = (
             LMEvalSemanticBackend(model) if run_cfg.use_llm_for_semantic else None
