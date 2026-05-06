@@ -26,6 +26,7 @@ Requirements
 from __future__ import annotations
 
 import logging
+import re
 from typing import Callable, Iterator
 
 import numpy as np
@@ -86,19 +87,102 @@ def _load_model(model_type: str, model_name: str, **kwargs):
     )
 
 
+def _collect_tasks(node, out: dict) -> None:
+    """Recursively collect lm-eval task objects from an arbitrary nested structure.
+
+    lm-eval returns ``{ConfigurableGroup: nested_value}`` dicts for groups.
+    Any object exposing ``test_docs`` is treated as a leaf task.
+    """
+    if isinstance(node, dict):
+        for key, val in node.items():
+            if val is None:
+                continue
+            if hasattr(val, "test_docs"):
+                name = key if isinstance(key, str) else (
+                    getattr(key, "task", None) or str(key)
+                )
+                out[name] = val
+            else:
+                _collect_tasks(val, out)
+    elif isinstance(node, (list, tuple)):
+        for item in node:
+            if hasattr(item, "test_docs"):
+                out.setdefault(str(len(out)), item)
+            else:
+                _collect_tasks(item, out)
+
+
+def _resolve_group_members(tm, group_name: str) -> list[str]:
+    """Return individual task names belonging to *group_name* via ``task_index``."""
+    task_index = getattr(tm, "task_index", None) or {}
+    members: list[str] = []
+    for name, config in task_index.items():
+        if not isinstance(config, dict):
+            continue
+        groups = config.get("group", [])
+        if isinstance(groups, str):
+            groups = [groups]
+        if group_name in (groups or []):
+            members.append(name)
+    return members
+
+
 def _load_task(task_name: str, num_fewshot: int = 0):
-    """Return an initialised lm-eval task object."""
+    """Return an lm-eval task object, or a ``dict[str, task]`` for groups.
+
+    Single tasks (e.g. ``"hellaswag"``) return the task object directly.
+    Group names (e.g. ``"mmlu"``) return a dict mapping each subtask name to
+    its task object.  Both forms are accepted by :class:`LMEvalDataset` and
+    :class:`LMEvalEvaluator`.
+    """
     _require_lm_eval()
     from lm_eval.tasks import TaskManager
 
     tm = TaskManager()
-    # lm-eval ≥ 0.4 API
     task_dict = tm.load_task_or_group([task_name])
-    task = task_dict[task_name]
-    # Some tasks need an explicit fewshot count at build time.
-    if hasattr(task, "set_fewshot_seed"):
-        task.set_fewshot_seed(1234)
-    return task
+
+    # Strategy 1: single task — direct string key lookup
+    if task_name in task_dict:
+        task = task_dict[task_name]
+        if hasattr(task, "set_fewshot_seed"):
+            task.set_fewshot_seed(1234)
+        return task
+
+    # Strategy 2: group — collect task objects from nested lm-eval structure
+    collected: dict = {}
+    _collect_tasks(task_dict, collected)
+    if collected:
+        logger.info("Loaded task group %r with %d subtasks.", task_name, len(collected))
+        for t in collected.values():
+            if hasattr(t, "set_fewshot_seed"):
+                t.set_fewshot_seed(1234)
+        return collected
+
+    # Strategy 3: group — load each subtask individually by scanning task_index
+    member_names = _resolve_group_members(tm, task_name)
+    if member_names:
+        logger.info("Loading group %r: %d subtasks.", task_name, len(member_names))
+        tasks: dict = {}
+        for name in member_names:
+            try:
+                sub = tm.load_task_or_group([name])
+                if name in sub and hasattr(sub[name], "test_docs"):
+                    t = sub[name]
+                    if hasattr(t, "set_fewshot_seed"):
+                        t.set_fewshot_seed(1234)
+                    tasks[name] = t
+                else:
+                    logger.warning("Subtask %r could not be loaded; skipping.", name)
+            except Exception as exc:
+                logger.warning("Error loading subtask %r: %s; skipping.", name, exc)
+        if tasks:
+            return tasks
+
+    raise ValueError(
+        f"Could not load {task_name!r} as a single task or group. "
+        f"Keys returned by lm-eval: {[str(k) for k in task_dict]!r}. "
+        f"Use 'lm-eval --tasks list' to browse available task names."
+    )
 
 
 def _make_instance(request_type: str, doc, arguments, idx: int = 0):
@@ -273,7 +357,7 @@ class LMEvalTokenizer(Tokenizer):
 # ---------------------------------------------------------------------------
 
 class LMEvalDataset:
-    """Extract samples from an lm-eval task.
+    """Extract samples from an lm-eval task or task group.
 
     Each sample is a dict with:
 
@@ -282,11 +366,14 @@ class LMEvalDataset:
     * ``"target"`` — the expected output / label.
     * ``"_doc"`` — the raw lm-eval document (needed by
       :class:`LMEvalEvaluator`).
+    * ``"_task_name"`` — *(groups only)* subtask name used by
+      :class:`LMEvalEvaluator` to route evaluation to the correct task.
 
     Parameters
     ----------
     task:
-        An initialised lm-eval task object.
+        An initialised lm-eval task object **or** a ``dict[str, task]``
+        returned by :func:`_load_task` for groups.
     split:
         Which split to use: ``"test"``, ``"validation"``/``"val"``,
         or ``"train"``.
@@ -314,7 +401,12 @@ class LMEvalDataset:
         prompt_field: str = "prompt",
         template_field: str | None = None,
     ) -> None:
-        self._task = task
+        if isinstance(task, dict):
+            self._task = None
+            self._tasks: dict | None = task   # {task_name: task_obj}
+        else:
+            self._task = task
+            self._tasks = None
         self._split = split
         self._num_fewshot = num_fewshot
         self._limit = limit
@@ -326,17 +418,30 @@ class LMEvalDataset:
     # ------------------------------------------------------------------
 
     def __iter__(self) -> Iterator[dict]:
-        docs = list(self._get_docs())
+        if self._tasks is not None:
+            raw: list[tuple] = []
+            for task_name, task_obj in self._tasks.items():
+                for doc in self._get_docs_for_task(task_obj):
+                    raw.append((doc, task_name, task_obj))
+        else:
+            raw = [(doc, None, self._task) for doc in self._get_docs()]
+
         if self._limit is not None:
-            docs = docs[: self._limit]
-        for doc in docs:
-            yield self._doc_to_sample(doc)
+            raw = raw[: self._limit]
+        for doc, task_name, task_obj in raw:
+            yield self._doc_to_sample(doc, task_name=task_name, task_obj=task_obj)
 
     def __len__(self) -> int:
-        docs = list(self._get_docs())
+        if self._tasks is not None:
+            total = sum(
+                sum(1 for _ in self._get_docs_for_task(t))
+                for t in self._tasks.values()
+            )
+        else:
+            total = sum(1 for _ in self._get_docs())
         if self._limit is not None:
-            return min(len(docs), self._limit)
-        return len(docs)
+            return min(total, self._limit)
+        return total
 
     def as_list(self) -> list[dict]:
         return list(self)
@@ -364,35 +469,40 @@ class LMEvalDataset:
     # Internals
     # ------------------------------------------------------------------
 
-    def _get_docs(self):
+    def _get_docs_for_task(self, task_obj):
         split = self._split.lower()
         if split == "test":
-            return self._task.test_docs()
+            return task_obj.test_docs()
         if split in ("validation", "val"):
-            return self._task.validation_docs()
+            return task_obj.validation_docs()
         if split == "train":
-            return self._task.training_docs()
+            return task_obj.training_docs()
         raise ValueError(f"Unknown split {self._split!r}")
 
-    def _doc_to_sample(self, doc: dict) -> dict:
-        # fewshot_context signature varies; handle both common forms.
+    def _get_docs(self):
+        return self._get_docs_for_task(self._task)
+
+    def _doc_to_sample(self, doc: dict, task_name=None, task_obj=None) -> dict:
+        task = task_obj if task_obj is not None else self._task
         try:
-            prompt = self._task.fewshot_context(doc, self._num_fewshot)
+            prompt = task.fewshot_context(doc, self._num_fewshot)
         except TypeError:
-            prompt = self._task.fewshot_context(
+            prompt = task.fewshot_context(
                 doc, self._num_fewshot, rnd=None, description=None
             )
-        target = self._task.doc_to_target(doc)
+        target = task.doc_to_target(doc)
         sample = {
             self._prompt_field: prompt,
             "target": target,
             "_doc": doc,
         }
+        if task_name is not None:
+            sample["_task_name"] = task_name
         if self._template_field is not None:
             try:
-                template = self._task.fewshot_context(doc, 0)
+                template = task.fewshot_context(doc, 0)
             except TypeError:
-                template = self._task.fewshot_context(doc, 0, rnd=None, description=None)
+                template = task.fewshot_context(doc, 0, rnd=None, description=None)
             sample[self._template_field] = template
         return sample
 
@@ -411,7 +521,7 @@ class LMEvalEvaluator(Evaluator):
       log-probabilities; return 1.0 if the predicted choice matches the gold
       label, 0.0 otherwise.
     * ``"generate_until"`` — generate text, then delegate to the task's
-      ``process_results`` metric (returns the first numeric metric value).
+i      ``process_results`` metric.
 
     Parameters
     ----------
@@ -422,6 +532,12 @@ class LMEvalEvaluator(Evaluator):
     generation_kwargs:
         Extra kwargs for generation tasks (``until``, ``max_gen_toks``, …).
         Defaults to a reasonable stopping condition.
+    metric_key:
+        Which key from ``process_results`` to use as the scalar score.
+        ``None`` (default) takes the first value in the returned dict,
+        which matches the first metric lm-eval would report for the task.
+        Pass an explicit key — e.g. ``"exact_match,flexible-extract"`` —
+        to pin the optimisation to a specific lm-eval metric.
     """
 
     def __init__(
@@ -430,9 +546,18 @@ class LMEvalEvaluator(Evaluator):
         task,
         generation_kwargs: dict | None = None,
         extra_stop_sequences: list[str] | None = None,
+        metric_key: str | None = None,
     ) -> None:
         self._model = model
-        self._task = task
+        if isinstance(task, dict):
+            self._task = None
+            self._tasks: dict | None = task   # {task_name: task_obj}
+            first_task = next(iter(task.values()))
+        else:
+            self._task = task
+            self._tasks = None
+            first_task = task
+
         if generation_kwargs is not None:
             self._gen_kwargs = generation_kwargs
         else:
@@ -440,7 +565,7 @@ class LMEvalEvaluator(Evaluator):
             # until=["Question:", "</s>"] which is needed for CoT generation).
             # Fall back to a conservative newline stop only when the task has
             # no config (e.g. legacy tasks or mocks).
-            cfg = getattr(task, "config", None)
+            cfg = getattr(first_task, "config", None)
             task_kwargs = dict(getattr(cfg, "generation_kwargs", None) or {})
             task_kwargs.setdefault("max_gen_toks", 256)
             if not task_kwargs.get("until"):
@@ -455,6 +580,8 @@ class LMEvalEvaluator(Evaluator):
                 if seq not in until:
                     until.append(seq)
             self._gen_kwargs = {**self._gen_kwargs, "until": until}
+
+         self._metric_key = metric_key
 
     def evaluate(self, original: str, compressed: str, sample: dict) -> float:
         doc = sample.get("_doc")
@@ -561,13 +688,14 @@ class LMEvalEvaluator(Evaluator):
 
     def _eval_generation(self, prompt: str, doc) -> float:
         """Generation-based scoring for open-ended tasks."""
+        prompt = self._apply_chat_template(prompt)
         instance = _make_instance("generate_until", doc, (prompt, self._gen_kwargs), 0)
         generated = _call_model(self._model, "generate_until", [instance])[0]
+        filtered = self._apply_filter_list(generated)
 
         try:
-            metrics: dict = self._task.process_results(doc, [generated])
-            # Return the first numeric metric value, normalised to [0, 1].
-            value = float(next(iter(metrics.values())))
+            metrics: dict = self._task.process_results(doc, filtered)
+            value = float(self._pick_metric(metrics))
             return max(0.0, min(1.0, value))
         except Exception as exc:
             logger.warning("LMEvalEvaluator: process_results failed (%s); returning 0.0", exc)
@@ -589,7 +717,7 @@ class LMEvalEvaluator(Evaluator):
             _make_instance(
                 "generate_until",
                 sample.get("_doc", {}),
-                (prompt, self._gen_kwargs),
+                (self._apply_chat_template(prompt), self._gen_kwargs),
                 i,
             )
             for i, (_, prompt, sample) in enumerate(valid)
@@ -598,15 +726,117 @@ class LMEvalEvaluator(Evaluator):
 
         for (orig_i, _, sample), generated in zip(valid, generated_texts):
             doc = sample.get("_doc")
+            filtered = self._apply_filter_list(generated)
             try:
-                metrics: dict = self._task.process_results(doc, [generated])
-                value = float(next(iter(metrics.values())))
+                metrics: dict = self._task.process_results(doc, filtered)
+                value = float(self._pick_metric(metrics))
                 scores[orig_i] = max(0.0, min(1.0, value))
             except Exception as exc:
                 logger.warning(
                     "LMEvalEvaluator: process_results failed (%s); returning 0.0", exc
                 )
         return scores
+
+    # ------------------------------------------------------------------
+    # Generation helpers
+    # ------------------------------------------------------------------
+
+    def _pick_metric(self, metrics: dict) -> float:
+        """Extract the scalar score from a ``process_results`` metrics dict.
+
+        Uses ``self._metric_key`` when set; otherwise falls back to the first
+        value in the dict (insertion order matches lm-eval's reporting order).
+        Raises ``KeyError`` with a helpful message when an explicit key is not
+        found so the caller can surface it as a warning.
+        """
+        if self._metric_key is not None:
+            if self._metric_key not in metrics:
+                available = list(metrics.keys())
+                raise KeyError(
+                    f"metric_key {self._metric_key!r} not found in process_results output. "
+                    f"Available keys: {available}"
+                )
+            return metrics[self._metric_key]
+        return next(iter(metrics.values()))
+
+    def _apply_chat_template(self, prompt: str) -> str:
+        """Wrap the prompt in the model's chat template for instruct/chat models.
+
+        lm-eval's ``generate_until`` tokenises the raw string directly via
+        ``tok_encode`` without applying any chat template.  For instruct models
+        loaded with ``apply_chat_template=True`` this means the model receives
+        plain text instead of the ``<|user|>…<|assistant|>`` tokens it was
+        fine-tuned on, causing poor or off-format generation.
+        """
+        if not getattr(self._model, "apply_chat_template", False):
+            return prompt
+        tokenizer = getattr(self._model, "tokenizer", None)
+        if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
+            return prompt
+        try:
+            return tokenizer.apply_chat_template(
+                [{"role": "user", "content": prompt}],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "LMEvalEvaluator: chat template failed (%s); using raw prompt.", exc
+            )
+            return prompt
+
+    def _apply_filter_list(self, generated: str) -> list[str]:
+        """Apply each filter in the task's ``filter_list`` independently.
+
+        The full lm-eval harness applies every filter spec (e.g. GSM8K's
+        strict-match *and* flexible-extract) to the raw generated text and
+        passes the full list of results to ``process_results``.  We reproduce
+        that here: each filter spec is run independently and its output is
+        collected in a list whose order matches the filter_list order.
+
+        When a filter finds no match it falls back to the raw generated text
+        for that slot, so ``process_results`` always receives a list of the
+        same length as ``filter_list``.
+
+        When the task has no filter_list, ``[generated]`` is returned so the
+        call to ``process_results`` is still valid.
+        """
+        filter_list = (
+            getattr(getattr(self._task, "config", None), "filter_list", None) or []
+        )
+        if not filter_list:
+            return [generated]
+
+        results: list[str] = []
+        for filter_spec in filter_list:
+            result = generated
+            ok = True
+            for step in filter_spec.get("filter", []):
+                fn = step.get("function")
+                if fn == "regex":
+                    pattern = step.get("regex_pattern", "")
+                    # group_select picks which match from finditer (0=first, -1=last)
+                    group_select = step.get("group_select", 0)
+                    try:
+                        matches = list(re.finditer(pattern, result))
+                        if not matches:
+                            ok = False
+                            break
+                        m = matches[group_select]
+                        # If the pattern has capture groups take the first non-empty one;
+                        # otherwise use the full match.
+                        if m.lastindex:
+                            result = next(
+                                (m.group(i) for i in range(1, m.lastindex + 1) if m.group(i)),
+                                m.group(0),
+                            )
+                        else:
+                            result = m.group(0)
+                    except (re.error, IndexError):
+                        ok = False
+                        break
+            results.append(result if (ok and result) else generated)
+        return results
 
 
 # ---------------------------------------------------------------------------
@@ -758,12 +988,12 @@ class LMEvalBackend:
     >>> print(result.summary())
     """
 
-    def __init__(self, model, task) -> None:
+    def __init__(self, model, task, metric_key: str | None = None) -> None:
         self.model = model
         self.task = task
         self.tokenizer = LMEvalTokenizer(model)
         self.semantic_backend = LMEvalSemanticBackend(model)
-        self.evaluator = LMEvalEvaluator(model, task)
+        self.evaluator = LMEvalEvaluator(model, task, metric_key=metric_key)
 
     # ------------------------------------------------------------------
     # Factory
@@ -776,6 +1006,7 @@ class LMEvalBackend:
         model_name: str,
         task_name: str,
         num_fewshot: int = 0,
+        metric_key: str | None = None,
         **model_kwargs,
     ) -> "LMEvalBackend":
         """Load model and task by name and return a ready :class:`LMEvalBackend`.
@@ -790,13 +1021,18 @@ class LMEvalBackend:
             lm-eval task name, e.g. ``"hellaswag"``, ``"mmlu"``, ``"gsm8k"``.
         num_fewshot:
             Number of few-shot examples.
+        metric_key:
+            Forwarded to :class:`LMEvalEvaluator`.  Pass e.g.
+            ``"exact_match,flexible-extract"`` to pin the optimisation to a
+            specific lm-eval metric for generation tasks.  ``None`` uses the
+            first metric in ``process_results`` output.
         **model_kwargs:
             Extra arguments forwarded to the model constructor (e.g.
             ``device="cuda"``, ``dtype="float16"``).
         """
         model = _load_model(model_type, model_name, **model_kwargs)
         task = _load_task(task_name, num_fewshot=num_fewshot)
-        return cls(model, task)
+        return cls(model, task, metric_key=metric_key)
 
     # ------------------------------------------------------------------
     # Dataset helpers
