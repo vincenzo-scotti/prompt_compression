@@ -1,17 +1,25 @@
 """Baseline strategies for comparison with the evolutionary search.
 
-Three baselines are provided:
+Six baselines are provided:
 
 * :class:`NoCompressionBaseline` — apply no transformations (identity).
 * :class:`AllTransformationsBaseline` — apply all transformations in sequence.
 * :class:`RandomSearchBaseline` — uniformly random search over the binary
   solution space, using the same evaluation budget as the evolutionary run
   (``pop_size × n_gen`` evaluations).
+* :class:`TruncatedPromptBaseline` — truncate each prompt to a fixed fraction
+  of its original character length (deterministic).
+* :class:`RandomDeletionBaseline` — randomly delete paragraphs with a given
+  probability (seeded for reproducibility).
+* :class:`SummarizationBaseline` — apply all semantic operators (O23–O28);
+  when the problem was built with ``use_llm_for_semantic=True`` these operators
+  use the LLM backend, otherwise they fall back to heuristics.
 """
 
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -159,5 +167,120 @@ class RandomSearchBaseline:
             name=self.name,
             solutions=pareto_solutions,
             objectives=pareto_objectives,
+            transformation_names=names,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Truncated-prompt baseline
+# ---------------------------------------------------------------------------
+
+class TruncatedPromptBaseline:
+    """Truncate each prompt to *target_ratio* of its original character length.
+
+    Deterministic — no seed needed.
+
+    Parameters
+    ----------
+    target_ratio:
+        Fraction of characters to keep (default 0.5 = 50 %).
+    """
+
+    name = "truncated_prompt"
+
+    def __init__(self, target_ratio: float = 0.5) -> None:
+        self._ratio = target_ratio
+
+    def run(self, problem: PromptCompressionProblem) -> BaselineResult:
+        ratio = self._ratio
+
+        def _truncate(text: str) -> str:
+            return text[:max(1, int(len(text) * ratio))]
+
+        avg_tokens, avg_perf = problem.score_transform_fn(_truncate)
+        solutions = np.zeros((1, problem.n_var), dtype=int)
+        objectives = np.array([[avg_tokens, avg_perf]])
+        return BaselineResult(
+            name=self.name,
+            solutions=solutions,
+            objectives=objectives,
+            transformation_names=[["TruncatedPrompt"]],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Random-deletion baseline
+# ---------------------------------------------------------------------------
+
+class RandomDeletionBaseline:
+    """Randomly delete paragraphs (double-newline blocks) from each prompt.
+
+    Each paragraph is dropped independently with probability *deletion_prob*.
+    The same ``seed`` guarantees identical compression across runs.
+
+    Parameters
+    ----------
+    deletion_prob:
+        Probability of dropping each paragraph.
+    seed:
+        RNG seed for reproducibility.
+    """
+
+    name = "random_deletion"
+
+    def __init__(self, deletion_prob: float = 0.3, seed: int = 42) -> None:
+        self._prob = deletion_prob
+        self._seed = seed
+
+    def run(self, problem: PromptCompressionProblem) -> BaselineResult:
+        prob = self._prob
+        # A single RNG instance is shared across all samples in the dataset so
+        # that the sequence of random decisions is fully determined by *seed*.
+        rng = random.Random(self._seed)
+
+        def _delete(text: str) -> str:
+            paragraphs = re.split(r"\n{2,}", text)
+            kept = [p for p in paragraphs if rng.random() >= prob]
+            return "\n\n".join(kept) if kept else text
+
+        avg_tokens, avg_perf = problem.score_transform_fn(_delete)
+        solutions = np.zeros((1, problem.n_var), dtype=int)
+        objectives = np.array([[avg_tokens, avg_perf]])
+        return BaselineResult(
+            name=self.name,
+            solutions=solutions,
+            objectives=objectives,
+            transformation_names=[["RandomDeletion"]],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Summarization baseline (LLM-backed semantic operators)
+# ---------------------------------------------------------------------------
+
+class SummarizationBaseline:
+    """Apply all semantic operators (O23–O28) as an LLM-based summarization baseline.
+
+    When the :class:`~prompt_piper.optimization.problem.PromptCompressionProblem`
+    was built with ``use_llm_for_semantic=True`` the semantic operators carry an
+    LLM backend and perform true neural summarization; otherwise they fall back
+    to their heuristic mode.  Either way, no extra configuration is needed here.
+    """
+
+    name = "summarization"
+
+    def run(self, problem: PromptCompressionProblem) -> BaselineResult:
+        bits = np.array(
+            [1 if t.category == "semantic" else 0 for t in problem._transforms],
+            dtype=int,
+        )
+        avg_tokens, avg_perf = problem.score_solution(bits)
+        solutions = bits[np.newaxis, :]
+        objectives = np.array([[avg_tokens, avg_perf]])
+        names = [_names_from_bits(bits, problem)]
+        return BaselineResult(
+            name=self.name,
+            solutions=solutions,
+            objectives=objectives,
             transformation_names=names,
         )

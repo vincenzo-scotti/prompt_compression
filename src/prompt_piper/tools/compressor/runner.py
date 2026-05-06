@@ -43,12 +43,34 @@ class CompressorRunner:
     # ------------------------------------------------------------------
 
     def run_all(self) -> list[CompressorResult]:
-        """Run every entry in ``config.runs`` and write results to disk."""
+        """Run every entry in ``config.runs`` and write results to disk.
+
+        Restartable: if ``output.overwrite`` is ``False`` and a result file
+        ``{output_dir}/{run_name}.json`` already exists, that run is skipped
+        and the existing result is loaded instead.
+        """
         if not self._config.runs:
             raise ValueError("No runs defined in config.")
 
+        out_dir = Path(self._config.output.dir)
         results = []
         for run_cfg in self._config.runs:
+            base_path = out_dir / f"{run_cfg.run_name}.json"
+            if not self._config.output.overwrite and base_path.exists():
+                logger.info(
+                    "Skipping completed run %s — result already exists at %s",
+                    run_cfg.run_name, base_path,
+                )
+                try:
+                    results.append(CompressorResult.load(base_path))
+                except Exception:
+                    logger.warning(
+                        "Could not load existing result for %s; re-running.",
+                        run_cfg.run_name,
+                    )
+                else:
+                    continue
+
             logger.info("Starting run: %s", run_cfg.run_name)
             try:
                 result = self.run_single(run_cfg)
@@ -62,7 +84,11 @@ class CompressorRunner:
         return results
 
     def run_single(self, run_cfg: RunConfig) -> CompressorResult:
-        """Execute one (task, algorithm) run and return a :class:`CompressorResult`."""
+        """Execute one (task, algorithm) run and return a :class:`CompressorResult`.
+
+        When ``run_cfg.baselines_only`` is ``True`` the NSGA-II optimisation
+        phase is skipped; only the requested baselines are evaluated.
+        """
         timestamp = CompressorResult.now_timestamp()
 
         backend = self._get_backend(run_cfg)
@@ -83,10 +109,7 @@ class CompressorRunner:
             fitting_report = None
             factory = backend.get("transformation_factory")
 
-        # ---- Search phase ------------------------------------------------
         exp_config = self._make_exp_config(run_cfg, n_subset=run_cfg.n_search)
-        callback = GenerationCallback(transform_names)
-
         exp = Experiment(
             config=exp_config,
             dataset=search_dataset,
@@ -96,6 +119,27 @@ class CompressorRunner:
             transformation_factory=factory,
         )
 
+        # ---- Test dataset ------------------------------------------------
+        test_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.test_split)
+        if run_cfg.n_test is not None:
+            import random
+            rng = random.Random(run_cfg.subset_seed + 1)
+            if run_cfg.n_test < len(test_dataset):
+                test_dataset = rng.sample(test_dataset, run_cfg.n_test)
+
+        # ================================================================
+        # BASELINES-ONLY mode: skip NSGA-II, run baselines on both splits
+        # ================================================================
+        if run_cfg.baselines_only:
+            return self._run_baselines_only(
+                run_cfg, exp, test_dataset,
+                transform_ids, transform_names,
+                timestamp, fitting_report,
+            )
+
+        # ---- Search phase ------------------------------------------------
+        callback = GenerationCallback(transform_names)
+
         t_search_start = time.perf_counter()
         exp_result = exp.run(
             baselines=run_cfg.baselines,
@@ -104,22 +148,24 @@ class CompressorRunner:
         search_elapsed = time.perf_counter() - t_search_start
 
         # ---- Test evaluation phase ----------------------------------------
-        test_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.test_split)
-        if run_cfg.n_test is not None:
-            import random
-            rng = random.Random(run_cfg.subset_seed + 1)
-            if run_cfg.n_test < len(test_dataset):
-                test_dataset = rng.sample(test_dataset, run_cfg.n_test)
-
         t_eval_start = time.perf_counter()
         test_objectives = exp.evaluate_solutions(exp_result.pareto_solutions, test_dataset)
 
-        # Baseline test evaluation
+        # Baseline test evaluation — re-evaluate bit vectors on the test split.
+        # Custom baselines (truncated_prompt, random_deletion) store all-zero
+        # bit vectors which would evaluate as no-compression; run them on the
+        # test problem directly instead.
+        _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion"}
         baseline_test: dict[str, tuple[float, float]] = {}
         for name, br in exp_result.baselines.items():
-            bl_test_obj = exp.evaluate_solutions(br.solutions, test_dataset)
-            avg_tok = float(bl_test_obj[:, 0].mean())
-            avg_perf = float(bl_test_obj[:, 1].mean())
+            if name in _CUSTOM_BASELINES:
+                test_br = exp.run_baseline(name, problem=exp._build_problem(test_dataset))
+                avg_tok = float(test_br.avg_tokens.mean())
+                avg_perf = float(test_br.avg_performance.mean())
+            else:
+                bl_test_obj = exp.evaluate_solutions(br.solutions, test_dataset)
+                avg_tok = float(bl_test_obj[:, 0].mean())
+                avg_perf = float(bl_test_obj[:, 1].mean())
             baseline_test[name] = (avg_tok, avg_perf)
 
         eval_elapsed = time.perf_counter() - t_eval_start
@@ -173,6 +219,52 @@ class CompressorRunner:
             fitting_report=fitting_report,
         )
 
+    def _run_baselines_only(
+        self,
+        run_cfg: RunConfig,
+        exp: "Experiment",
+        test_dataset: list[dict],
+        transform_ids: list[str],
+        transform_names: list[str],
+        timestamp: str,
+        fitting_report,
+    ) -> CompressorResult:
+        """Run baselines on both search and test splits; no NSGA-II optimisation."""
+        search_problem = exp._build_problem(exp._sample_subset())
+        test_problem = exp._build_problem(test_dataset)
+
+        t_eval_start = time.perf_counter()
+        baseline_evals = []
+        for name in (run_cfg.baselines or []):
+            search_br = exp.run_baseline(name, problem=search_problem)
+            test_br = exp.run_baseline(name, problem=test_problem)
+            baseline_evals.append(
+                BaselineEval(
+                    name=name,
+                    transformation_names=search_br.transformation_names,
+                    search_avg_tokens=float(search_br.avg_tokens.mean()),
+                    search_avg_performance=float(search_br.avg_performance.mean()),
+                    test_avg_tokens=float(test_br.avg_tokens.mean()),
+                    test_avg_performance=float(test_br.avg_performance.mean()),
+                )
+            )
+        eval_elapsed = time.perf_counter() - t_eval_start
+
+        return CompressorResult(
+            run_name=run_cfg.run_name,
+            timestamp=timestamp,
+            config=self._serialise_config(run_cfg),
+            transformation_ids=transform_ids,
+            transformation_names=transform_names,
+            search_elapsed_seconds=0.0,
+            eval_elapsed_seconds=eval_elapsed,
+            pareto_solutions=[],
+            baselines=baseline_evals,
+            generation_history=[],
+            extra={"dry_run": self._dry_run, "baselines_only": True},
+            fitting_report=fitting_report,
+        )
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
@@ -186,10 +278,16 @@ class CompressorRunner:
                 self._config.model.name,
                 self._config.model.type,
             )
+            kwargs = dict(self._config.model.kwargs)
+            if self._config.model.quantization:
+                from transformers import BitsAndBytesConfig
+                kwargs["quantization_config"] = BitsAndBytesConfig(
+                    **self._config.model.quantization
+                )
             self._model = _load_model(
                 self._config.model.type,
                 self._config.model.name,
-                **self._config.model.kwargs,
+                **kwargs,
             )
             logger.info("Model loaded.")
         return self._model
@@ -218,6 +316,7 @@ class CompressorRunner:
             model, task,
             generation_kwargs=run_cfg.generation_kwargs,
             extra_stop_sequences=run_cfg.extra_stop_sequences,
+            metric_key=run_cfg.metric_key,
         )
         tokenizer = LMEvalTokenizer(model)
         semantic_backend = (
@@ -340,6 +439,8 @@ class CompressorRunner:
         fitter = DatasetVocabularyFitter(
             dataset,
             prompt_field=run_cfg.prompt_field,
+            template_field=run_cfg.compress_field,
+            compress_field=run_cfg.compress_field,
             seed=run_cfg.seed,
             backend=semantic_backend,  # None → corpus-only; set → also LLM-backed
         )

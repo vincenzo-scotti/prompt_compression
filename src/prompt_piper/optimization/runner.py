@@ -18,7 +18,10 @@ from .baselines import (
     AllTransformationsBaseline,
     BaselineResult,
     NoCompressionBaseline,
+    RandomDeletionBaseline,
     RandomSearchBaseline,
+    SummarizationBaseline,
+    TruncatedPromptBaseline,
 )
 from .config import ExperimentConfig
 from .evaluator import Evaluator, MockEvaluator
@@ -29,6 +32,9 @@ _BASELINE_REGISTRY = {
     "no_compression": NoCompressionBaseline,
     "all_transformations": AllTransformationsBaseline,
     "random_search": RandomSearchBaseline,
+    "truncated_prompt": TruncatedPromptBaseline,
+    "random_deletion": RandomDeletionBaseline,
+    "summarization": SummarizationBaseline,
 }
 
 
@@ -300,6 +306,8 @@ class Experiment:
         if name == "random_search":
             n_eval = self.config.pop_size * self.config.n_gen
             baseline = cls(n_evaluations=n_eval, seed=self.config.seed)
+        elif name == "random_deletion":
+            baseline = cls(seed=self.config.seed)
         else:
             baseline = cls()
 

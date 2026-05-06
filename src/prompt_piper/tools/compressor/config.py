@@ -72,6 +72,11 @@ class ModelConfig:
     type: str = "hf"
     name: str = "gpt2"
     kwargs: dict[str, Any] = field(default_factory=dict)
+    #: Optional quantization config expressed as a plain dict so it can be
+    #: written in YAML.  Keys mirror the ``transformers.BitsAndBytesConfig``
+    #: constructor (e.g. ``load_in_4bit``, ``bnb_4bit_quant_type``).
+    #: The runner constructs the real ``BitsAndBytesConfig`` object at load time.
+    quantization: dict[str, Any] | None = None
 
 
 @dataclass
@@ -129,6 +134,15 @@ class RunConfig:
     #: to add a model's EOT token (e.g. ``["<|eot_id|>"]`` for Llama-3,
     #: ``["<|im_end|>"]`` for Qwen, ``"<|end|>"`` for Phi-3).
     extra_stop_sequences: list[str] | None = None
+    #: Select which lm-eval metric to optimise when ``process_results`` returns
+    #: multiple keys (e.g. ``"exact_match,flexible-extract"`` for GSM8K).
+    #: ``None`` (default) picks the first key, which matches lm-eval's own
+    #: primary-metric convention.
+    metric_key: str | None = None
+    #: When ``True``, skip the NSGA-II optimisation phase and run only the
+    #: baselines listed in ``baselines``.  Useful for dedicated baseline
+    #: evaluation runs that reuse the same model session as the main experiment.
+    baselines_only: bool = False
 
     @property
     def run_name(self) -> str:
@@ -177,6 +191,7 @@ class CompressorConfig:
             type=model_raw.get("type", "hf"),
             name=model_raw.get("name", "gpt2"),
             kwargs=model_raw.get("kwargs", {}),
+            quantization=model_raw.get("quantization", None),
         )
 
         output_raw = raw.get("output", {})
@@ -247,7 +262,12 @@ class CompressorConfig:
     def to_dict(self) -> dict:
         """Serializable representation (no numpy, no non-JSON types)."""
         return {
-            "model": {"type": self.model.type, "name": self.model.name, "kwargs": self.model.kwargs},
+            "model": {
+                "type": self.model.type,
+                "name": self.model.name,
+                "kwargs": self.model.kwargs,
+                "quantization": self.model.quantization,
+            },
             "output": {"dir": self.output.dir, "overwrite": self.output.overwrite},
             "defaults": self.defaults,
             "runs": [
