@@ -150,6 +150,7 @@ class DatasetVocabularyFitter:
         seed: int = 42,
         backend: Backend | None = None,
         template_field: str | None = None,
+         compress_field: str | None = None,
     ) -> None:
         corpus = dataset
         if sample_size is not None and sample_size < len(dataset):
@@ -161,6 +162,13 @@ class DatasetVocabularyFitter:
         self._seed = seed
         self._backend = backend
         self._template_field = template_field
+        # When compressing the 0-shot field directly there is no few-shot prefix
+        # in the text that operators will receive, so O17 must not protect any
+        # paragraphs.  Treat template_field as inactive in that case.
+        compress = compress_field or prompt_field
+        self._effective_template_field = (
+            template_field if template_field and template_field != compress else None
+        )
 
     # ------------------------------------------------------------------
     # Public fitters
@@ -1074,14 +1082,16 @@ class DatasetVocabularyFitter:
         block; its paragraph count is returned so :class:`ContextPruning` can
         protect it from pruning.
 
-        Returns 0 when ``template_field`` was not set or the 0-shot text cannot
-        be located inside the full prompt.
+        Returns 0 when the effective template field is not set (either because
+        ``template_field`` was not supplied, or because ``compress_field``
+        equals ``template_field`` meaning there is no prefix to protect), or
+        when the 0-shot text cannot be located inside the full prompt.
         """
-        if self._template_field is None or not self._corpus:
+        if self._effective_template_field is None or not self._corpus:
             return 0
         sample = self._corpus[0]
         full = str(sample.get(self._prompt_field, ""))
-        question_only = str(sample.get(self._template_field, ""))
+        question_only = str(sample.get(self._effective_template_field, ""))
         if not question_only:
             return 0
         idx = full.find(question_only)
