@@ -1,0 +1,82 @@
+# ICSE'26 Full Experiments
+#
+# Placeholder — add additional models below following the same structure
+# as preliminary_experiment.yaml.  Each model block gets its own entry
+# with the same six tasks.
+#
+# Example skeleton (fill in model name, quantization, and per-task settings):
+#
+# model:
+#   type: hf
+#   name: <model-id>
+#   kwargs:
+#     apply_chat_template: true
+#     device_map: auto
+#     dtype: bfloat16
+#     trust_remote_code: true
+#   quantization:
+#     load_in_4bit: true
+#     bnb_4bit_quant_type: nf4
+#     bnb_4bit_compute_dtype: bfloat16
+#     bnb_4bit_use_double_quant: true
+#
+# output:
+#   dir: ./results/icse_26/<model-short-name>
+#   overwrite: false
+#
+# defaults:
+#   compress_field: prompt_0shot
+#   use_fitting: true
+#   use_llm_for_semantic: false
+#   n_search: 100
+#   n_test: 200
+#   algorithm: nsga2
+#   pop_size: 30
+#   n_gen: 50
+#   seed: 42
+#   subset_seed: 42
+#   baselines:
+#     - no_compression
+#     - all_transformations
+#     - random_search
+#     - summarization
+#     - truncated_prompt
+#     - random_deletion
+#   extra_stop_sequences: []   # set model-specific EOT token here
+#   metric_key: null
+#   search_split: validation
+#   test_split: test
+#
+# runs:
+#   - name: gsm8k_nsga2
+#     task: gsm8k
+#     num_fewshot: 5
+#     search_split: train
+#     test_split: test
+#     metric_key: "exact_match,flexible-extract"
+#
+#   - name: arc_challenge_nsga2
+#     task: arc_challenge
+#     num_fewshot: 25
+#
+#   - name: mmlu_nsga2
+#     task: mmlu
+#     num_fewshot: 5
+#
+#   - name: ifeval_nsga2
+#     task: ifeval
+#     num_fewshot: 0
+#     search_split: train
+#     test_split: train
+#
+#   - name: gpqa_nsga2
+#     task: gpqa_diamond
+#     num_fewshot: 0
+#     search_split: test
+#     test_split: test
+#
+#   - name: bbh_nsga2
+#     task: bbh
+#     num_fewshot: 3
+#     search_split: test
+#     test_split: test

@@ -1,0 +1,126 @@
+# ICSE'26 Preliminary Experiments — Qwen/Qwen3.5-9B (4-bit NF4)
+#
+# Runs NSGA-II optimisation for 6 tasks and evaluates all six baselines
+# alongside each run.  The model is loaded once and reused across all runs.
+# All baselines require the LLM for performance evaluation, so combining
+# them here avoids redundant model loads.
+#
+# Script: scripts/preliminary_run.sh
+
+model:
+  type: hf
+  name: Qwen/Qwen3.5-9B
+  kwargs:
+    apply_chat_template: true
+    device_map: auto
+    dtype: bfloat16
+    trust_remote_code: true
+  quantization:
+    load_in_4bit: true
+    bnb_4bit_quant_type: nf4
+    bnb_4bit_compute_dtype: bfloat16
+    bnb_4bit_use_double_quant: true
+
+output:
+  dir: ./results/icse_26/qwen3.5-9b
+  overwrite: false   # set true to force re-run; false enables restart on interruption
+
+defaults:
+  # Compression mode: compress only the 0-shot prompt so few-shot
+  # demonstrations are never touched by the operator pipeline.
+  compress_field: prompt_0shot
+
+  # DatasetVocabularyFitter: mine corpus for stopwords, abbreviations,
+  # section headers, and LLM-backed structural patterns.
+  use_fitting: true
+  # Enables the LLM backend for semantic operators (O23–O28) during both
+  # optimisation and the SummarizationBaseline.
+  use_llm_for_semantic: true
+
+  # Optimisation budget (preliminary scale — reduce further for a dry-run)
+  n_search: 100     # samples used during NSGA-II search
+  n_test: 200       # samples used for held-out test evaluation
+  algorithm: nsga2
+  pop_size: 30
+  n_gen: 50
+
+  # Reproducibility
+  seed: 42
+  subset_seed: 42
+
+  # All six baselines evaluated alongside each optimisation run.
+  # Every baseline needs the LLM for performance evaluation, so they run
+  # in the same model session as the optimisation.
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  # Qwen stop token — appended to the task's own until list.
+  extra_stop_sequences: ["<|im_end|>"]
+
+  # metric_key: null means "pick the first metric" (lm-eval primary-metric convention).
+  # Override per-run when a task exposes multiple metrics.
+  metric_key: null
+
+  # Splits — overridden per task when only one split is available.
+  search_split: validation
+  test_split: test
+
+
+runs:
+
+  # ------------------------------------------------------------------ GSM8K
+  # 5-shot, train/test splits.
+  # flexible-extract is the primary metric for models that paraphrase answers.
+  - name: gsm8k_nsga2
+    task: gsm8k
+    num_fewshot: 5
+    search_split: train
+    test_split: test
+    metric_key: "exact_match,flexible-extract"
+
+  # ------------------------------------------------------- ARC Challenge
+  # 25-shot, standard validation/test split.
+  - name: arc_challenge_nsga2
+    task: arc_challenge
+    num_fewshot: 25
+    search_split: validation
+    test_split: test
+
+  # ------------------------------------------------------------------ MMLU
+  # Group of 57 subtasks.  5-shot, validation/test split.
+  - name: mmlu_nsga2
+    task: mmlu
+    num_fewshot: 5
+    search_split: validation
+    test_split: test
+
+  # ----------------------------------------------------------------- IFEval
+  # Instruction-following benchmark.  Only a single split ("train") is
+  # available in lm-eval; search and test draw different random subsets via
+  # subset_seed vs subset_seed+1.
+  - name: ifeval_nsga2
+    task: ifeval
+    num_fewshot: 0
+    search_split: train
+    test_split: train
+
+  # ------------------------------------------------------------------ GPQA
+  # Graduate-level questions.  Only "test" split available.
+  - name: gpqa_nsga2
+    task: gpqa_diamond
+    num_fewshot: 0
+    search_split: test
+    test_split: test
+
+  # ------------------------------------------------------------------- BBH
+  # BIG-Bench Hard — group of 27 subtasks.  3-shot, "test" split only.
+  - name: bbh_nsga2
+    task: bbh
+    num_fewshot: 3
+    search_split: test
+    test_split: test

@@ -114,3 +114,22 @@ class PromptCompressionProblem(Problem):
         """
         pipeline = [t for t, b in zip(self._transforms, bits) if b]
         return self._score_pipeline(pipeline)
+
+    def score_transform_fn(self, fn) -> tuple[float, float]:
+        """Score an arbitrary compression callable on the dataset.
+
+        Useful for baselines that use non-operator compression strategies
+        (e.g. truncation, random deletion) without subclassing
+        :class:`~prompt_piper.transformations.base.Transformation`.
+
+        Parameters
+        ----------
+        fn:
+            Any callable ``(text: str) -> str``.
+
+        Returns
+        -------
+        tuple[float, float]
+            ``(avg_tokens, avg_performance)`` — performance is *positive*.
+        """
+        return self._score_pipeline([fn])
