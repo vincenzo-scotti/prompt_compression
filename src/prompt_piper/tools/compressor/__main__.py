@@ -120,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Baselines to run alongside the search",
     )
     alg.add_argument("--no-llm-semantic", action="store_true",
-                     help="Disable LLM backend for semantic transformations "
+                     help="Disable  LLM backend for semantic transformations "
                           "(use heuristic fallbacks instead)")
     alg.add_argument(
         "--compress-field",

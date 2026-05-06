@@ -581,7 +581,7 @@ i      ``process_results`` metric.
                     until.append(seq)
             self._gen_kwargs = {**self._gen_kwargs, "until": until}
 
-         self._metric_key = metric_key
+        self._metric_key = metric_key
 
     def evaluate(self, original: str, compressed: str, sample: dict) -> float:
         doc = sample.get("_doc")
@@ -592,11 +592,12 @@ i      ``process_results`` metric.
             )
             return 0.0
 
-        output_type = getattr(self._task, "OUTPUT_TYPE", "generate_until")
+        task = self._get_task(sample)
+        output_type = getattr(task, "OUTPUT_TYPE", "generate_until")
 
         if output_type in ("multiple_choice", "loglikelihood"):
-            return self._eval_multiple_choice(compressed, doc)
-        return self._eval_generation(compressed, doc)
+            return self._eval_multiple_choice(compressed, doc, task)
+        return self._eval_generation(compressed, doc, task)
 
     def evaluate_batch(
         self,
@@ -608,7 +609,7 @@ i      ``process_results`` metric.
         if not samples:
             return []
 
-        output_type = getattr(self._task, "OUTPUT_TYPE", "generate_until")
+        output_type = getattr(self._get_task(samples[0]), "OUTPUT_TYPE", "generate_until")
         if output_type in ("multiple_choice", "loglikelihood"):
             return self._eval_multiple_choice_batch(compresseds, samples)
         return self._eval_generation_batch(compresseds, samples)
@@ -617,13 +618,13 @@ i      ``process_results`` metric.
     # Strategy implementations
     # ------------------------------------------------------------------
 
-    def _eval_multiple_choice(self, prompt: str, doc) -> float:
+    def _eval_multiple_choice(self, prompt: str, doc, task) -> float:
         """Loglikelihood-based scoring for MC tasks."""
         try:
-            choices = self._task.doc_to_choice(doc)
+            choices = task.doc_to_choice(doc)
         except AttributeError:
             # Task doesn't expose choices; fall back to generation.
-            return self._eval_generation(prompt, doc)
+            return self._eval_generation(prompt, doc, task)
 
         requests = [
             _make_instance("loglikelihood", doc, (prompt, choice), i)
@@ -633,7 +634,7 @@ i      ``process_results`` metric.
         log_probs = [r[0] if isinstance(r, (tuple, list)) else r for r in results]
         predicted = int(np.argmax(log_probs))
 
-        gold = self._task.doc_to_target(doc)
+        gold = task.doc_to_target(doc)
         # Gold may be an int (index) or a string (choice text).
         if isinstance(gold, int):
             return 1.0 if predicted == gold else 0.0
@@ -644,9 +645,10 @@ i      ``process_results`` metric.
         self, prompts: list[str], samples: list[dict]
     ) -> list[float]:
         """Batched loglikelihood scoring: one model call for all samples."""
+        first_task = self._get_task(samples[0])
         first_doc = samples[0].get("_doc")
         try:
-            self._task.doc_to_choice(first_doc)
+            first_task.doc_to_choice(first_doc)
         except AttributeError:
             return self._eval_generation_batch(prompts, samples)
 
@@ -660,8 +662,9 @@ i      ``process_results`` metric.
         choices_counts: list[int] = []
         valid_indices: list[int] = []
         for orig_i, prompt, sample in valid:
+            task = self._get_task(sample)
             doc = sample.get("_doc")
-            choices = self._task.doc_to_choice(doc)
+            choices = task.doc_to_choice(doc)
             choices_counts.append(len(choices))
             valid_indices.append(orig_i)
             for i, choice in enumerate(choices):
@@ -677,24 +680,25 @@ i      ``process_results`` metric.
             idx += n_choices
             log_probs = [r[0] if isinstance(r, (tuple, list)) else r for r in chunk]
             predicted = int(np.argmax(log_probs))
+            task = self._get_task(sample)
             doc = sample.get("_doc")
-            gold = self._task.doc_to_target(doc)
-            choices = self._task.doc_to_choice(doc)
+            gold = task.doc_to_target(doc)
+            choices = task.doc_to_choice(doc)
             if isinstance(gold, int):
                 scores[orig_i] = 1.0 if predicted == gold else 0.0
             else:
                 scores[orig_i] = 1.0 if choices[predicted] == gold else 0.0
         return scores
 
-    def _eval_generation(self, prompt: str, doc) -> float:
+    def _eval_generation(self, prompt: str, doc, task) -> float:
         """Generation-based scoring for open-ended tasks."""
         prompt = self._apply_chat_template(prompt)
         instance = _make_instance("generate_until", doc, (prompt, self._gen_kwargs), 0)
         generated = _call_model(self._model, "generate_until", [instance])[0]
-        filtered = self._apply_filter_list(generated)
+        filtered = self._apply_filter_list(generated, task)
 
         try:
-            metrics: dict = self._task.process_results(doc, filtered)
+            metrics: dict = task.process_results(doc, filtered)
             value = float(self._pick_metric(metrics))
             return max(0.0, min(1.0, value))
         except Exception as exc:
@@ -725,10 +729,11 @@ i      ``process_results`` metric.
         generated_texts = _call_model(self._model, "generate_until", requests)
 
         for (orig_i, _, sample), generated in zip(valid, generated_texts):
+            task = self._get_task(sample)
             doc = sample.get("_doc")
-            filtered = self._apply_filter_list(generated)
+            filtered = self._apply_filter_list(generated, task)
             try:
-                metrics: dict = self._task.process_results(doc, filtered)
+                metrics: dict = task.process_results(doc, filtered)
                 value = float(self._pick_metric(metrics))
                 scores[orig_i] = max(0.0, min(1.0, value))
             except Exception as exc:
@@ -740,6 +745,23 @@ i      ``process_results`` metric.
     # ------------------------------------------------------------------
     # Generation helpers
     # ------------------------------------------------------------------
+
+    def _get_task(self, sample: dict):
+        """Return the task object for this sample.
+
+        For single-task evaluators returns ``self._task`` directly.  For
+        group evaluators (``self._task is None``) routes to the correct
+        subtask via ``sample["_task_name"]``, falling back to the first
+        subtask when the key is absent.
+        """
+        if self._task is not None:
+            return self._task
+        task_name = sample.get("_task_name")
+        if task_name and self._tasks and task_name in self._tasks:
+            return self._tasks[task_name]
+        if self._tasks:
+            return next(iter(self._tasks.values()))
+        return None
 
     def _pick_metric(self, metrics: dict) -> float:
         """Extract the scalar score from a ``process_results`` metrics dict.
@@ -785,7 +807,7 @@ i      ``process_results`` metric.
             )
             return prompt
 
-    def _apply_filter_list(self, generated: str) -> list[str]:
+    def _apply_filter_list(self, generated: str, task) -> list[str]:
         """Apply each filter in the task's ``filter_list`` independently.
 
         The full lm-eval harness applies every filter spec (e.g. GSM8K's
@@ -802,7 +824,7 @@ i      ``process_results`` metric.
         call to ``process_results`` is still valid.
         """
         filter_list = (
-            getattr(getattr(self._task, "config", None), "filter_list", None) or []
+            getattr(getattr(task, "config", None), "filter_list", None) or []
         )
         if not filter_list:
             return [generated]

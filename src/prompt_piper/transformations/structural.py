@@ -128,30 +128,42 @@ class ContextPruning(Transformation):
     anchor_terms:
         If provided, paragraphs that contain none of these terms are removed.
         If None (default), paragraphs that match boilerplate markers are removed.
+    n_protected_paragraphs:
+        Number of leading blank-line-separated paragraphs to leave untouched.
+        Use this to protect the few-shot prefix from being pruned — set it to
+        the number of paragraphs that belong to the few-shot block so that only
+        the variable question portion is subject to pruning.
     """
 
     id = "O17"
     name = "ContextPruning"
     category = "structural"
 
-    def __init__(self, anchor_terms: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        anchor_terms: list[str] | None = None,
+        n_protected_paragraphs: int = 0,
+    ) -> None:
         self._anchors: list[re.Pattern[str]] | None = (
             [re.compile(re.escape(t), re.I) for t in anchor_terms]
             if anchor_terms is not None
             else None
         )
+        self._n_protected = n_protected_paragraphs
 
     def apply(self, prompt: str) -> str:
         paragraphs = re.split(r"\n{2,}", prompt)
+        protected = paragraphs[:self._n_protected]
+        to_prune = paragraphs[self._n_protected:]
         kept: list[str] = []
-        for para in paragraphs:
+        for para in to_prune:
             if self._anchors is not None:
                 if any(p.search(para) for p in self._anchors):
                     kept.append(para)
             else:
                 if not _BOILERPLATE_MARKERS.search(para):
                     kept.append(para)
-        return "\n\n".join(kept).strip()
+        return "\n\n".join(protected + kept).strip()
 
 
 # ---------------------------------------------------------------------------
