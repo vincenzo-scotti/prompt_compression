@@ -149,6 +149,7 @@ class DatasetVocabularyFitter:
         sample_size: int | None = None,
         seed: int = 42,
         backend: Backend | None = None,
+        template_field: str | None = None,
     ) -> None:
         corpus = dataset
         if sample_size is not None and sample_size < len(dataset):
@@ -159,6 +160,7 @@ class DatasetVocabularyFitter:
         self._target_field = target_field
         self._seed = seed
         self._backend = backend
+        self._template_field = template_field
 
     # ------------------------------------------------------------------
     # Public fitters
@@ -408,6 +410,10 @@ class DatasetVocabularyFitter:
         frequent words in the target strings, excluding very common English
         words.
 
+        When ``template_field`` was supplied to the constructor, the few-shot
+        prefix paragraphs are automatically protected from pruning — only the
+        variable question portion (the 0-shot part) is subject to removal.
+
         Parameters
         ----------
         top_k:
@@ -423,7 +429,10 @@ class DatasetVocabularyFitter:
             if w not in _STOPWORDS and len(w) >= 3
         ][:top_k]
 
-        return ContextPruning(anchor_terms=anchors if anchors else None)
+        return ContextPruning(
+            anchor_terms=anchors if anchors else None,
+            n_protected_paragraphs=self._count_fewshot_paragraphs(),
+        )
 
     def fit_example_simplification(
         self,
@@ -1056,3 +1065,27 @@ class DatasetVocabularyFitter:
             for s in self._corpus
             if s.get(self._target_field) is not None
         ]
+
+    def _count_fewshot_paragraphs(self) -> int:
+        """Count blank-line-separated paragraphs that form the few-shot prefix.
+
+        Uses the first corpus sample to find where the 0-shot question starts
+        inside the full prompt.  Everything before that point is the few-shot
+        block; its paragraph count is returned so :class:`ContextPruning` can
+        protect it from pruning.
+
+        Returns 0 when ``template_field`` was not set or the 0-shot text cannot
+        be located inside the full prompt.
+        """
+        if self._template_field is None or not self._corpus:
+            return 0
+        sample = self._corpus[0]
+        full = str(sample.get(self._prompt_field, ""))
+        question_only = str(sample.get(self._template_field, ""))
+        if not question_only:
+            return 0
+        idx = full.find(question_only)
+        if idx <= 0:
+            return 0
+        prefix = full[:idx]
+        return len([p for p in re.split(r"\n{2,}", prefix) if p.strip()])
