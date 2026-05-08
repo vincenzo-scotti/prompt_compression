@@ -317,10 +317,12 @@ class CompressorRunner:
             generation_kwargs=run_cfg.generation_kwargs,
             extra_stop_sequences=run_cfg.extra_stop_sequences,
             metric_key=run_cfg.metric_key,
+            apply_chat_template=run_cfg.apply_chat_template,
         )
         tokenizer = LMEvalTokenizer(model)
         semantic_backend = (
-            LMEvalSemanticBackend(model) if run_cfg.use_llm_for_semantic else None
+            LMEvalSemanticBackend(model, apply_chat_template=run_cfg.apply_chat_template)
+            if run_cfg.use_llm_for_semantic else None
         )
 
         import inspect
@@ -362,6 +364,8 @@ class CompressorRunner:
             num_fewshot=run_cfg.num_fewshot,
             prompt_field=run_cfg.prompt_field,
             template_field=template_field,
+            apply_chat_template=run_cfg.apply_chat_template,
+            fewshot_as_multiturn=run_cfg.fewshot_as_multiturn,
         )
         return ds.as_list()
 

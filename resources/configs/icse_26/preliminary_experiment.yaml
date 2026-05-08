@@ -11,7 +11,8 @@ model:
   type: hf
   name: Qwen/Qwen3.5-9B
   kwargs:
-    apply_chat_template: true
+    batch_size: 1           # increase if GPU memory allows (4-bit 9B ~5 GB)
+    max_length: 8192        # cap context window; Qwen3 supports up to 128 K
     device_map: auto
     dtype: bfloat16
     trust_remote_code: true
@@ -29,6 +30,12 @@ defaults:
   # Compression mode: compress only the 0-shot prompt so few-shot
   # demonstrations are never touched by the operator pipeline.
   compress_field: prompt_0shot
+
+  # Wrap prompts in the model's chat template (required for instruct models).
+  # fewshot_as_multiturn formats few-shot examples as separate conversation
+  # turns, which is the recommended setup for chat-tuned models.
+  apply_chat_template: true
+  fewshot_as_multiturn: true
 
   # DatasetVocabularyFitter: mine corpus for stopwords, abbreviations,
   # section headers, and LLM-backed structural patterns.
@@ -76,12 +83,15 @@ runs:
   # ------------------------------------------------------------------ GSM8K
   # 5-shot, train/test splits.
   # flexible-extract is the primary metric for models that paraphrase answers.
+  # max_gen_toks: 1024 — GSM8K needs long CoT; default 256 is too short.
   - name: gsm8k_nsga2
     task: gsm8k
     num_fewshot: 5
     search_split: train
     test_split: test
     metric_key: "exact_match,flexible-extract"
+    generation_kwargs:
+      max_gen_toks: 1024
 
   # ------------------------------------------------------- ARC Challenge
   # 25-shot, standard validation/test split.

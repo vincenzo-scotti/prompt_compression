@@ -143,6 +143,13 @@ class RunConfig:
     #: baselines listed in ``baselines``.  Useful for dedicated baseline
     #: evaluation runs that reuse the same model session as the main experiment.
     baselines_only: bool = False
+    #: Wrap prompts in the model's chat template before evaluation.  Required
+    #: for instruct/chat-tuned models (e.g. Qwen-Instruct, Llama-Instruct).
+    #: Has no effect on OpenAI chat-completions models (handled by lm-eval).
+    apply_chat_template: bool = False
+    #: Format few-shot examples as separate conversation turns.  Only
+    #: meaningful when ``apply_chat_template`` is also ``True``.
+    fewshot_as_multiturn: bool = False
 
     @property
     def run_name(self) -> str:
