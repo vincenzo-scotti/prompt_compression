@@ -164,6 +164,22 @@ python -m prompt_piper.tools.compressor \
 
 Results are written as self-contained JSON files under `--output-dir`. Each file includes the full configuration, Pareto-optimal solutions with both search and test objectives, baseline comparisons, and (when fitting was used) the discovered vocabulary patterns.
 
+## ICSE '26 experiments
+
+Preliminary experiments across six benchmarks, run once with a self-hosted model and once with GPT-4o. Results land in `results/icse_26/`.
+
+```bash
+mkdir -p logs
+
+# Qwen/Qwen3.5-9B (GPU required) — GSM8K, ARC Challenge, MMLU, IFEval, GPQA, BBH
+nohup bash scripts/preliminary_run.sh > logs/preliminary_hf.log 2>&1 &
+
+# GPT-4o (requires OPENAI_API_KEY in .env) — same tasks via generative variants
+nohup bash scripts/preliminary_run_chatgpt.sh > logs/preliminary_chatgpt.log 2>&1 &
+```
+
+Both scripts load `.env` automatically, are restartable (completed runs are skipped), and accept `--dry-run` for a CPU-only smoke test.
+
 ## Notebooks
 
 ```bash
