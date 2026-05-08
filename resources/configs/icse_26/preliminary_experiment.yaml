@@ -45,11 +45,11 @@ defaults:
   use_llm_for_semantic: true
 
   # Optimisation budget (preliminary scale — reduce further for a dry-run)
-  n_search: 100     # samples used during NSGA-II search
-  n_test: 200       # samples used for held-out test evaluation
+  n_search: 20     # samples used during NSGA-II search
+  n_test: 50       # samples used for held-out test evaluation
   algorithm: nsga2
-  pop_size: 30
-  n_gen: 50
+  pop_size: 20
+  n_gen: 20
 
   # Reproducibility
   seed: 42
@@ -89,7 +89,6 @@ runs:
     num_fewshot: 5
     search_split: train
     test_split: test
-    metric_key: "exact_match,flexible-extract"
     generation_kwargs:
       max_gen_toks: 1024
 

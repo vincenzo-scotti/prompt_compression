@@ -43,10 +43,10 @@ defaults:
   use_fitting: true
   use_llm_for_semantic: true
 
-  n_search: 100
-  n_test: 200
+  n_search: 20     # samples used during NSGA-II search
+  n_test: 50       # samples used for held-out test evaluation
   algorithm: nsga2
-  pop_size: 10
+  pop_size: 20
   n_gen: 20
 
   seed: 42
@@ -79,7 +79,6 @@ runs:
     num_fewshot: 3
     search_split: train
     test_split: test
-    metric_key: "exact_match,flexible-extract"
     generation_kwargs:
       max_gen_toks: 1024
 
