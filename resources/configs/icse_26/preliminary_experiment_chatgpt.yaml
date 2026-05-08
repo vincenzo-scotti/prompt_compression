@@ -1,0 +1,126 @@
+# ICSE'26 Preliminary Experiments — gpt-4o (OpenAI Chat Completions)
+#
+# Mirrors preliminary_experiment.yaml but uses GPT-4o via the OpenAI API.
+# The model is stateless (no GPU, no quantisation) so there is no warm-up
+# overhead; each run starts immediately.
+#
+# Requires: OPENAI_API_KEY environment variable.
+# Script: scripts/preliminary_run_chatgpt.sh
+#
+# Multiple-choice tasks cannot use loglikelihood scoring with the chat API.
+# lm-eval 0.4 provides generative ("generate_until") variants for all three:
+#   arc_challenge  → arc_challenge_chat           (same splits, no extra deps)
+#   mmlu           → mmlu_generative              (57 subtasks, same splits)
+#   gpqa_diamond   → gpqa_diamond_generative_n_shot (gated: requires HF_TOKEN)
+# In these variants the model generates "A"/"B"/"C"/"D" and the output is
+# matched against the gold answer key.  Accuracy is computed with exact-match
+# after normalisation, so metric_key: null (first metric) is correct.
+#
+# Cost note: fitting with use_llm_for_semantic: true makes O(dozens) of GPT-4o
+# API calls per run for pattern discovery (O4, O10, O15, O28).  Disable by
+# setting use_llm_for_semantic: false to reduce cost at the expense of richer
+# pattern discovery.
+
+model:
+  type: openai-chat-completions
+  name: gpt-4o
+  kwargs: {}              # no device_map / dtype / quantisation for API models
+
+output:
+  dir: ./results/icse_26/gpt-4o
+  overwrite: false        # set true to force re-run; false enables restart
+
+defaults:
+  # Compression mode: compress only the 0-shot prompt so few-shot
+  # demonstrations are never touched by the operator pipeline.
+  compress_field: prompt_0shot
+
+  # OpenAI chat-completions API handles chat formatting internally;
+  # apply_chat_template and fewshot_as_multiturn must be false here.
+  apply_chat_template: false
+  fewshot_as_multiturn: false
+
+  use_fitting: true
+  use_llm_for_semantic: true
+
+  n_search: 100
+  n_test: 200
+  algorithm: nsga2
+  pop_size: 10
+  n_gen: 20
+
+  seed: 42
+  subset_seed: 42
+
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  # OpenAI chat models do not need model-specific EOT stop tokens — the API
+  # terminates generation at its own EOS automatically.
+  extra_stop_sequences: null
+
+  metric_key: null
+  search_split: validation
+  test_split: test
+
+
+runs:
+
+  # ------------------------------------------------------------------ GSM8K
+  # 3-shot, train/test splits. generate_until (flexible-extract metric).
+  # max_gen_toks: 1024 — CoT answers need more than the 256 default.
+  - name: gsm8k_nsga2
+    task: gsm8k
+    num_fewshot: 3
+    search_split: train
+    test_split: test
+    metric_key: "exact_match,flexible-extract"
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  # ----------------------------------------------------------------- IFEval
+  # Instruction-following benchmark. Only "train" split available.
+  - name: ifeval_nsga2
+    task: ifeval
+    num_fewshot: 0
+    search_split: train
+    test_split: train
+
+  # --------------------------------------------------------- ARC Challenge
+  # Generative variant: model outputs A/B/C/D, matched against answerKey.
+  # Same validation/test splits as arc_challenge.
+  - name: arc_challenge_nsga2
+    task: arc_challenge_chat
+    num_fewshot: 3
+    search_split: validation
+    test_split: test
+
+  # ------------------------------------------------------------------ MMLU
+  # Generative variant: 57-subtask group, same splits as mmlu.
+  - name: mmlu_nsga2
+    task: mmlu_generative
+    num_fewshot: 3
+    search_split: validation
+    test_split: test
+
+  # ----------------------------------------------------------------- GPQA
+  # Generative n-shot variant. Gated dataset — requires HF_TOKEN.
+  # search_split and test_split both "test" (only split available).
+  - name: gpqa_nsga2
+    task: gpqa_diamond_generative_n_shot
+    num_fewshot: 0
+    search_split: test
+    test_split: test
+
+  # ------------------------------------------------------------------- BBH
+  # BIG-Bench Hard — 27 generative subtasks. generate_until, "test" only.
+  - name: bbh_nsga2
+    task: bbh
+    num_fewshot: 3
+    search_split: test
+    test_split: test

@@ -75,9 +75,12 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         else:
             pretrained = model_name
         return HFLM(pretrained=pretrained, **kwargs)
-    if model_type == "openai":
-        from lm_eval.models.openai_completions import OpenAICompletionsLM
-        return OpenAICompletionsLM(model=model_name, **kwargs)
+    if model_type in ("openai", "openai-completions"):
+        from lm_eval.models.openai_completions import OpenAICompletionsAPI
+        return OpenAICompletionsAPI(model=model_name, **kwargs)
+    if model_type == "openai-chat-completions":
+        from lm_eval.models.openai_completions import OpenAIChatCompletion
+        return OpenAIChatCompletion(model=model_name, **kwargs)
     if model_type == "vllm":
         from lm_eval.models.vllm_causallms import VLLM
         return VLLM(pretrained=model_name, **kwargs)
@@ -205,6 +208,40 @@ def _call_model(model, method: str, requests: list):
     both Instance-based (lm-eval >= 0.4) and tuple-based (older) APIs."""
     fn = getattr(model, method)
     return fn(requests)
+
+
+def _is_chat_model(model) -> bool:
+    """Return True when *model* is an OpenAI-style chat-completions model.
+
+    Chat models require prompts to be delivered as ``JsonChatStr`` objects
+    (JSON-encoded lists of ``{"role": ..., "content": ...}`` dicts) rather
+    than plain strings.  They also do not support ``loglikelihood``.
+    """
+    try:
+        from lm_eval.models.openai_completions import LocalChatCompletion
+        return isinstance(model, LocalChatCompletion)
+    except ImportError:
+        return False
+
+
+def _wrap_chat_prompt(prompt: str, system_prompt: str | None = None):
+    """Wrap *prompt* in a ``JsonChatStr`` for OpenAI chat-completions models.
+
+    Returns a ``JsonChatStr`` whose ``.prompt`` field is a JSON array of
+    ``{"role": ..., "content": ...}`` dicts as expected by lm-eval's
+    ``OpenAIChatCompletion._create_payload``.
+    """
+    import json
+    try:
+        from lm_eval.models.api_models import JsonChatStr
+    except ImportError:
+        raise ImportError("lm-eval >= 0.4 is required for chat model support")
+
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
+    return JsonChatStr(json.dumps(messages))
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +379,29 @@ class LMEvalTokenizer(Tokenizer):
             except Exception:
                 pass
 
-        # ---- 4. Fallback: whitespace ------------------------------------
+        # ---- 4. OpenAI chat models: resolve via model name attribute ----
+        # OpenAIChatCompletion stores the model name in ``model.model``
+        # (e.g. "gpt-4o").  Try tiktoken before falling back to whitespace.
+        model_name_attr = getattr(model, "model", None)
+        if isinstance(model_name_attr, str) and model_name_attr:
+            try:
+                import tiktoken  # noqa: PLC0415
+                try:
+                    enc = tiktoken.encoding_for_model(model_name_attr)
+                except KeyError:
+                    enc = None
+                if enc is not None:
+                    def _openai_name_tiktoken(text: str, _enc=enc) -> int:
+                        return len(_enc.encode(text))
+                    logger.info(
+                        "LMEvalTokenizer: using tiktoken %r for model %r.",
+                        enc.name, model_name_attr,
+                    )
+                    return _openai_name_tiktoken
+            except ImportError:
+                pass
+
+        # ---- 5. Fallback: whitespace ------------------------------------
         logger.warning(
             "LMEvalTokenizer: could not resolve a tokenizer for model %r; "
             "falling back to whitespace splitting.  For accurate token counts "
@@ -400,6 +459,8 @@ class LMEvalDataset:
         limit: int | None = None,
         prompt_field: str = "prompt",
         template_field: str | None = None,
+        apply_chat_template: bool = False,
+        fewshot_as_multiturn: bool = False,
     ) -> None:
         if isinstance(task, dict):
             self._task = None
@@ -412,6 +473,8 @@ class LMEvalDataset:
         self._limit = limit
         self._prompt_field = prompt_field
         self._template_field = template_field
+        self._apply_chat_template = apply_chat_template
+        self._fewshot_as_multiturn = fewshot_as_multiturn
 
     # ------------------------------------------------------------------
     # Public API
@@ -459,11 +522,15 @@ class LMEvalDataset:
         limit: int | None = None,
         prompt_field: str = "prompt",
         template_field: str | None = None,
+        apply_chat_template: bool = False,
+        fewshot_as_multiturn: bool = False,
     ) -> "LMEvalDataset":
         """Convenience constructor — loads the task by name."""
         task = _load_task(task_name, num_fewshot=num_fewshot)
         return cls(task, split=split, num_fewshot=num_fewshot, limit=limit,
-                   prompt_field=prompt_field, template_field=template_field)
+                   prompt_field=prompt_field, template_field=template_field,
+                   apply_chat_template=apply_chat_template,
+                   fewshot_as_multiturn=fewshot_as_multiturn)
 
     # ------------------------------------------------------------------
     # Internals
@@ -484,8 +551,14 @@ class LMEvalDataset:
 
     def _doc_to_sample(self, doc: dict, task_name=None, task_obj=None) -> dict:
         task = task_obj if task_obj is not None else self._task
+        chat_kwargs = {}
+        if self._apply_chat_template or self._fewshot_as_multiturn:
+            chat_kwargs = {
+                "apply_chat_template": self._apply_chat_template,
+                "fewshot_as_multiturn": self._fewshot_as_multiturn,
+            }
         try:
-            prompt = task.fewshot_context(doc, self._num_fewshot)
+            prompt = task.fewshot_context(doc, self._num_fewshot, **chat_kwargs)
         except TypeError:
             prompt = task.fewshot_context(
                 doc, self._num_fewshot, rnd=None, description=None
@@ -499,6 +572,8 @@ class LMEvalDataset:
         if task_name is not None:
             sample["_task_name"] = task_name
         if self._template_field is not None:
+            # 0-shot template: always raw text (no chat template) so transformations
+            # operate on plain instruction strings, not pre-formatted chat turns.
             try:
                 template = task.fewshot_context(doc, 0)
             except TypeError:
@@ -547,8 +622,10 @@ i      ``process_results`` metric.
         generation_kwargs: dict | None = None,
         extra_stop_sequences: list[str] | None = None,
         metric_key: str | None = None,
+        apply_chat_template: bool = False,
     ) -> None:
         self._model = model
+        self._apply_chat = apply_chat_template
         if isinstance(task, dict):
             self._task = None
             self._tasks: dict | None = task   # {task_name: task_obj}
@@ -558,18 +635,17 @@ i      ``process_results`` metric.
             self._tasks = None
             first_task = task
 
+        # Always start from the task's own generation_kwargs so that task-specific
+        # until sequences (e.g. GSM8K's ["Question:", "</s>"]) are preserved.
+        # User-supplied generation_kwargs are merged on top (user wins on conflicts).
+        cfg = getattr(first_task, "config", None)
+        task_kwargs = dict(getattr(cfg, "generation_kwargs", None) or {})
+        task_kwargs.setdefault("max_gen_toks", 256)
+        if not task_kwargs.get("until"):
+            task_kwargs["until"] = ["\n", "\n\n"]
         if generation_kwargs is not None:
-            self._gen_kwargs = generation_kwargs
+            self._gen_kwargs = {**task_kwargs, **generation_kwargs}
         else:
-            # Use the task's own generation_kwargs (e.g. GSM8K ships with
-            # until=["Question:", "</s>"] which is needed for CoT generation).
-            # Fall back to a conservative newline stop only when the task has
-            # no config (e.g. legacy tasks or mocks).
-            cfg = getattr(first_task, "config", None)
-            task_kwargs = dict(getattr(cfg, "generation_kwargs", None) or {})
-            task_kwargs.setdefault("max_gen_toks", 256)
-            if not task_kwargs.get("until"):
-                task_kwargs["until"] = ["\n", "\n\n"]
             self._gen_kwargs = task_kwargs
 
         # Merge model-specific stop tokens (e.g. "<|eot_id|>" for Llama-3)
@@ -692,8 +768,11 @@ i      ``process_results`` metric.
 
     def _eval_generation(self, prompt: str, doc, task) -> float:
         """Generation-based scoring for open-ended tasks."""
-        prompt = self._apply_chat_template(prompt)
-        instance = _make_instance("generate_until", doc, (prompt, self._gen_kwargs), 0)
+        if _is_chat_model(self._model):
+            actual_prompt = _wrap_chat_prompt(prompt)
+        else:
+            actual_prompt = self._apply_chat_template(prompt)
+        instance = _make_instance("generate_until", doc, (actual_prompt, self._gen_kwargs), 0)
         generated = _call_model(self._model, "generate_until", [instance])[0]
         filtered = self._apply_filter_list(generated, task)
 
@@ -717,11 +796,16 @@ i      ``process_results`` metric.
         if not valid:
             return scores
 
+        use_chat = _is_chat_model(self._model)
         requests = [
             _make_instance(
                 "generate_until",
                 sample.get("_doc", {}),
-                (self._apply_chat_template(prompt), self._gen_kwargs),
+                (
+                    _wrap_chat_prompt(prompt) if use_chat
+                    else self._apply_chat_template(prompt),
+                    self._gen_kwargs,
+                ),
                 i,
             )
             for i, (_, prompt, sample) in enumerate(valid)
@@ -790,7 +874,7 @@ i      ``process_results`` metric.
         plain text instead of the ``<|user|>…<|assistant|>`` tokens it was
         fine-tuned on, causing poor or off-format generation.
         """
-        if not getattr(self._model, "apply_chat_template", False):
+        if not self._apply_chat:
             return prompt
         tokenizer = getattr(self._model, "tokenizer", None)
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
@@ -921,28 +1005,30 @@ class LMEvalSemanticBackend:
         stop_sequences: list[str] | None = None,
         prompt_template: str | None = None,
         system_prompt: str | None = None,
+        apply_chat_template: bool = False,
     ) -> None:
         self._model = model
         self._max_gen_toks = max_gen_toks
         self._stop_sequences = stop_sequences or ["\n\n"]
         self._template = prompt_template  # None → auto-select in __call__
         self._system_prompt = system_prompt or _SEMANTIC_SYSTEM_PROMPT
-        # Detect whether the model was loaded with apply_chat_template=True.
-        # lm-eval stores this flag directly on the HFLM/VLLM object.
-        self._use_chat = bool(getattr(model, "apply_chat_template", False))
+        self._use_chat = apply_chat_template
 
     def __call__(self, text: str, instruction: str) -> str:
-        if self._use_chat:
-            prompt = self._format_chat(instruction, text)
-        else:
-            template = self._template or _SEMANTIC_COMPLETION_TEMPLATE
-            prompt = template.format(instruction=instruction, text=text)
-
         gen_kwargs = {
             "until": self._stop_sequences,
             "max_gen_toks": self._max_gen_toks,
         }
-        instance = _make_instance("generate_until", {}, (prompt, gen_kwargs), 0)
+        if _is_chat_model(self._model):
+            user_content = f"{instruction}\n\n[TEXT]\n{text}\n[/TEXT]"
+            actual_prompt = _wrap_chat_prompt(user_content, system_prompt=self._system_prompt)
+        elif self._use_chat:
+            actual_prompt = self._format_chat(instruction, text)
+        else:
+            template = self._template or _SEMANTIC_COMPLETION_TEMPLATE
+            actual_prompt = template.format(instruction=instruction, text=text)
+
+        instance = _make_instance("generate_until", {}, (actual_prompt, gen_kwargs), 0)
         result = _call_model(self._model, "generate_until", [instance])
         return result[0].strip()
 
