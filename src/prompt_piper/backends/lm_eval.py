@@ -224,6 +224,23 @@ def _is_chat_model(model) -> bool:
         return False
 
 
+def _hf_model_has_chat_template(model) -> bool:
+    """Return True when *model*'s tokenizer has a configured chat template.
+
+    ``apply_chat_template`` is defined on the base ``PreTrainedTokenizer``
+    class and therefore exists on *all* HF tokenizers — including base models
+    like GPT-2.  The correct signal is ``tokenizer.chat_template is not None``,
+    which is only set for instruct/chat checkpoints (Qwen, Llama-Instruct, …).
+    A string tokenizer (self-hosted OpenAI-compatible servers) is excluded.
+    """
+    tokenizer = getattr(model, "tokenizer", None)
+    return (
+        tokenizer is not None
+        and not isinstance(tokenizer, str)
+        and getattr(tokenizer, "chat_template", None) is not None
+    )
+
+
 def _wrap_chat_prompt(prompt: str, system_prompt: str | None = None):
     """Wrap *prompt* in a ``JsonChatStr`` for OpenAI chat-completions models.
 
@@ -1022,7 +1039,7 @@ class LMEvalSemanticBackend:
         if _is_chat_model(self._model):
             user_content = f"{instruction}\n\n[TEXT]\n{text}\n[/TEXT]"
             actual_prompt = _wrap_chat_prompt(user_content, system_prompt=self._system_prompt)
-        elif self._use_chat:
+        elif self._use_chat or _hf_model_has_chat_template(self._model):
             actual_prompt = self._format_chat(instruction, text)
         else:
             template = self._template or _SEMANTIC_COMPLETION_TEMPLATE
@@ -1053,11 +1070,21 @@ class LMEvalSemanticBackend:
         tokenizer = getattr(self._model, "tokenizer", None)
         if tokenizer is not None and hasattr(tokenizer, "apply_chat_template"):
             try:
-                return tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
+                try:
+                    # enable_thinking=False suppresses thinking-mode preamble on
+                    # Qwen3 and other reasoning models that support this kwarg.
+                    return tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=False,
+                    )
+                except TypeError:
+                    return tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
             except Exception as exc:
                 logger.warning(
                     "LMEvalSemanticBackend: chat template failed (%s); "
