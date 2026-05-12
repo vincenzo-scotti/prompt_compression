@@ -39,6 +39,7 @@
 #     - no_compression
 #     - all_transformations
 #     - random_search
+#     - multi_armed_bandit
 #     - summarization
 #     - truncated_prompt
 #     - random_deletion
