@@ -23,6 +23,7 @@ from .algorithms import build_algorithm
 from .baselines import (
     AllTransformationsBaseline,
     BaselineResult,
+    MultiArmedBanditBaseline,
     NoCompressionBaseline,
     RandomDeletionBaseline,
     RandomSearchBaseline,
@@ -41,6 +42,7 @@ _BASELINE_REGISTRY = {
     "truncated_prompt": TruncatedPromptBaseline,
     "random_deletion": RandomDeletionBaseline,
     "summarization": SummarizationBaseline,
+    "multi_armed_bandit": MultiArmedBanditBaseline,
 }
 
 
@@ -309,7 +311,7 @@ class Experiment:
             problem = self._build_problem(self._sample_subset())
 
         cls = _BASELINE_REGISTRY[name]
-        if name == "random_search":
+        if name in ("random_search", "multi_armed_bandit"):
             n_eval = self.config.pop_size * self.config.n_gen
             baseline = cls(n_evaluations=n_eval, seed=self.config.seed)
         elif name == "random_deletion":
@@ -377,6 +379,11 @@ class Experiment:
         i_classes, s_classes, d_classes = self._resolve_scoped_classes(
             self._transform_classes
         )
+        # When compressing a sub-field (e.g. 'prompt_0shot'), the few-shot
+        # demonstrations are loaded from sample['_shots'] for assembly/evaluation
+        # but must remain intact — only data-section operators are applicable.
+        if compress_field != self.config.prompt_field:
+            s_classes = []
 
         # Build sections from the dataset using PromptSplitter.
         splitter = PromptSplitter(

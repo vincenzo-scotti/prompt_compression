@@ -1,6 +1,6 @@
 """Baseline strategies for comparison with the evolutionary search.
 
-Six baselines are provided:
+Seven baselines are provided:
 
 * :class:`NoCompressionBaseline` — apply no transformations (identity).
 * :class:`AllTransformationsBaseline` — apply all transformations in sequence.
@@ -14,6 +14,9 @@ Six baselines are provided:
 * :class:`SummarizationBaseline` — apply all semantic operators (O23–O28);
   when the problem was built with ``use_llm_for_semantic=True`` these operators
   use the LLM backend, otherwise they fall back to heuristics.
+* :class:`MultiArmedBanditBaseline` — Thompson Sampling bandit over the
+  binary operator space; uses task performance as the reward signal and
+  returns the Pareto-non-dominated subset of all visited solutions.
 """
 
 from __future__ import annotations
@@ -251,6 +254,93 @@ class RandomDeletionBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=[["RandomDeletion"]],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Multi-Armed Bandit baseline (Thompson Sampling)
+# ---------------------------------------------------------------------------
+
+class MultiArmedBanditBaseline:
+    """Thompson Sampling bandit over the binary operator space.
+
+    Each of the ``n_var`` operators is treated as an independent Bernoulli arm
+    with a Beta(α, β) prior.  At every round the arm beliefs are sampled, a
+    binary vector is constructed by thresholding at 0.5, and the observed task
+    performance is used to update the beliefs of all *active* arms (those
+    where the corresponding bit is 1).
+
+    The total evaluation budget matches the evolutionary run:
+    ``n_evaluations = pop_size × n_gen``.
+
+    After the budget is exhausted the Pareto-non-dominated subset of all
+    visited (solution, objective) pairs is returned — the same post-processing
+    used by :class:`RandomSearchBaseline`.
+
+    Parameters
+    ----------
+    n_evaluations:
+        Total number of solutions to evaluate.
+    seed:
+        NumPy random seed for reproducibility.
+    alpha_init:
+        Initial α parameter of the Beta prior (default 1 → uniform).
+    beta_init:
+        Initial β parameter of the Beta prior (default 1 → uniform).
+    """
+
+    name = "multi_armed_bandit"
+
+    def __init__(
+        self,
+        n_evaluations: int = 2500,
+        seed: int = 42,
+        alpha_init: float = 1.0,
+        beta_init: float = 1.0,
+    ) -> None:
+        self._n_eval = n_evaluations
+        self._seed = seed
+        self._alpha_init = alpha_init
+        self._beta_init = beta_init
+
+    def run(self, problem: PromptCompressionProblem) -> BaselineResult:
+        rng = np.random.default_rng(self._seed)
+        n_var = problem.n_var
+
+        alpha = np.full(n_var, self._alpha_init, dtype=float)
+        beta_ = np.full(n_var, self._beta_init, dtype=float)
+
+        all_solutions = np.empty((self._n_eval, n_var), dtype=int)
+        all_objectives = np.empty((self._n_eval, 2), dtype=float)
+
+        for i in range(self._n_eval):
+            # Draw a probability estimate from each arm's current belief.
+            theta = rng.beta(alpha, beta_)
+            bits = (theta > 0.5).astype(int)
+
+            avg_tokens, avg_perf = problem.score_solution(bits)
+            all_solutions[i] = bits
+            all_objectives[i] = [avg_tokens, avg_perf]
+
+            # Update beliefs for active arms only: performance is in [0, 1]
+            # by the Evaluator contract, so it directly serves as a reward.
+            active = bits.astype(bool)
+            alpha[active] += avg_perf
+            beta_[active] += (1.0 - avg_perf)
+
+        # Extract Pareto-non-dominated front (minimise tokens, maximise perf).
+        obj_for_pareto = all_objectives.copy()
+        obj_for_pareto[:, 1] = -obj_for_pareto[:, 1]
+        pareto_solutions, pareto_obj_neg = _pareto_front(all_solutions, obj_for_pareto)
+        pareto_objectives = pareto_obj_neg.copy()
+        pareto_objectives[:, 1] = -pareto_objectives[:, 1]
+
+        names = [_names_from_bits(s, problem) for s in pareto_solutions]
+        return BaselineResult(
+            name=self.name,
+            solutions=pareto_solutions,
+            objectives=pareto_objectives,
+            transformation_names=names,
         )
 
 

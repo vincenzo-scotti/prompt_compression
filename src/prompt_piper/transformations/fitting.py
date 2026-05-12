@@ -746,7 +746,7 @@ class DatasetVocabularyFitter:
                 break  # take the first valid pattern
             except re.error:
                 pass
-        return ChunkCompression(separator=separator)
+        return ChunkCompression(separator=separator, backend=self._backend)
 
     def fit_boundary(self) -> tuple[str, int]:
         """Detect the shared instruction/few-shot prefix via longest common prefix.
