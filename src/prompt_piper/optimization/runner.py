@@ -10,8 +10,14 @@ from typing import Any
 import numpy as np
 from pymoo.optimize import minimize
 
-from prompt_piper.transformations import ALL_TRANSFORMATIONS
+from prompt_piper.transformations import (
+    ALL_TRANSFORMATIONS,
+    DATA_OPS,
+    INSTRUCTION_OPS,
+    SHOT_OPS,
+)
 from prompt_piper.transformations.base import Transformation
+from prompt_piper.transformations.sections import PromptSplitter
 
 from .algorithms import build_algorithm
 from .baselines import (
@@ -331,6 +337,32 @@ class Experiment:
                 )
         return pool
 
+    def _resolve_scoped_classes(
+        self, all_classes: list[type[Transformation]]
+    ) -> tuple[
+        list[type[Transformation]],
+        list[type[Transformation]],
+        list[type[Transformation]],
+    ]:
+        """Return (instruction_classes, shot_classes, data_classes) filtered
+        from the full pool and respecting ``transformation_ids``."""
+        id_set = (
+            set(self.config.transformation_ids)
+            if self.config.transformation_ids is not None
+            else None
+        )
+
+        def _filter(scope_pool: list[type[Transformation]]) -> list[type[Transformation]]:
+            result = [cls for cls in scope_pool if cls in set(all_classes)]
+            if id_set is not None:
+                result = [cls for cls in result if cls.id in id_set]
+            return result
+
+        i_classes = _filter(INSTRUCTION_OPS)
+        s_classes = _filter(SHOT_OPS)
+        d_classes = _filter(DATA_OPS) if self.config.compress_input_data else []
+        return i_classes, s_classes, d_classes
+
     def _sample_subset(self) -> list[dict]:
         """Draw a reproducible subset from the full dataset."""
         n = self.config.n_subset
@@ -340,15 +372,33 @@ class Experiment:
         return rng.sample(self._full_dataset, n)
 
     def _build_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
-        """Instantiate the pymoo problem with pre-built transformation objects."""
-        instances = [self._transformation_factory(T) for T in self._transform_classes]
+        """Instantiate the pymoo problem with section-aware transformation objects."""
+        compress_field = self.config.compress_field or self.config.prompt_field
+        i_classes, s_classes, d_classes = self._resolve_scoped_classes(
+            self._transform_classes
+        )
+
+        # Build sections from the dataset using PromptSplitter.
+        splitter = PromptSplitter(
+            samples=dataset,
+            compress_field=compress_field,
+        )
+        sections = splitter.split_all()
+
+        i_ops = [self._transformation_factory(cls) for cls in i_classes]
+        s_ops = [self._transformation_factory(cls) for cls in s_classes]
+        d_ops = [self._transformation_factory(cls) for cls in d_classes]
+
         return PromptCompressionProblem(
-            transformations=instances,
+            instruction_ops=i_ops,
+            shot_ops=s_ops,
+            data_ops=d_ops,
+            sections=sections,
             dataset=dataset,
             evaluator=self._evaluator,
             tokenizer=self._tokenizer,
             prompt_field=self.config.prompt_field,
-            compress_field=self.config.compress_field,
+            compress_field=compress_field,
         )
 
     @staticmethod
@@ -360,8 +410,5 @@ class Experiment:
         F = res.F.copy()       # (n_pareto, 2): [avg_tokens, -avg_perf]
         F[:, 1] = -F[:, 1]    # restore positive performance
 
-        names = [
-            [t.name for t, b in zip(problem._transforms, row) if b]
-            for row in X
-        ]
+        names = [problem.names_from_bits(row) for row in X]
         return X, F, names

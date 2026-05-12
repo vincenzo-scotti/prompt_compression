@@ -466,6 +466,12 @@ class LMEvalDataset:
         Use ``"prompt_0shot"`` as the conventional name and pass it as
         ``compress_field`` in :class:`ExperimentConfig` to compress that
         field instead of the full formatted prompt.
+    shots_field:
+        When set (and ``template_field`` is also set), each sample gets an
+        entry under this key containing the plain-text few-shot block — the
+        text that precedes the 0-shot prompt in the full plain-text context.
+        Defaults to ``"_shots"``.  The value is ``""`` when ``num_fewshot``
+        is 0 or when the boundary cannot be detected.
     """
 
     def __init__(
@@ -476,6 +482,7 @@ class LMEvalDataset:
         limit: int | None = None,
         prompt_field: str = "prompt",
         template_field: str | None = None,
+        shots_field: str | None = "_shots",
         apply_chat_template: bool = False,
         fewshot_as_multiturn: bool = False,
     ) -> None:
@@ -490,6 +497,7 @@ class LMEvalDataset:
         self._limit = limit
         self._prompt_field = prompt_field
         self._template_field = template_field
+        self._shots_field = shots_field
         self._apply_chat_template = apply_chat_template
         self._fewshot_as_multiturn = fewshot_as_multiturn
 
@@ -539,6 +547,7 @@ class LMEvalDataset:
         limit: int | None = None,
         prompt_field: str = "prompt",
         template_field: str | None = None,
+        shots_field: str | None = "_shots",
         apply_chat_template: bool = False,
         fewshot_as_multiturn: bool = False,
     ) -> "LMEvalDataset":
@@ -546,6 +555,7 @@ class LMEvalDataset:
         task = _load_task(task_name, num_fewshot=num_fewshot)
         return cls(task, split=split, num_fewshot=num_fewshot, limit=limit,
                    prompt_field=prompt_field, template_field=template_field,
+                   shots_field=shots_field,
                    apply_chat_template=apply_chat_template,
                    fewshot_as_multiturn=fewshot_as_multiturn)
 
@@ -596,6 +606,24 @@ class LMEvalDataset:
             except TypeError:
                 template = task.fewshot_context(doc, 0, rnd=None, description=None)
             sample[self._template_field] = template
+
+            # Plain-text shots block: prefix of the plain full prompt that
+            # precedes the 0-shot portion.  Stored so PromptSplitter can use
+            # it directly rather than re-detecting via regex.
+            if self._shots_field is not None and self._num_fewshot > 0:
+                try:
+                    plain_full = task.fewshot_context(doc, self._num_fewshot)
+                except TypeError:
+                    plain_full = task.fewshot_context(
+                        doc, self._num_fewshot, rnd=None, description=None
+                    )
+                idx = plain_full.find(template)
+                sample[self._shots_field] = (
+                    plain_full[:idx].rstrip("\n") if idx > 0 else ""
+                )
+            elif self._shots_field is not None:
+                sample[self._shots_field] = ""
+
         return sample
 
 

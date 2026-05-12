@@ -74,6 +74,33 @@ Transformations only see the instruction and test item. The few-shot demonstrati
 | Compress the instruction only, leave shots untouched | ≥ 1 | `"prompt_0shot"` |
 | Compress the entire few-shot prompt as a single block | ≥ 1 | `null` / omit |
 
+### Operator availability by compression mode
+
+Several structural operators are only meaningful when transformations can see the few-shot demonstrations:
+
+| Operator | `compress_field="prompt"` | `compress_field="prompt_0shot"` |
+|---|---|---|
+| O19 ExampleRemoval | ✅ removes last shot | no-op (no example blocks in 0-shot text) |
+| O20 ExampleSubsetSelection | ✅ keeps first *k* shots | no-op |
+| O21 ExampleSimplification | ✅ compacts `Input:/Output:` blocks | no-op |
+| O27 ExampleDistillation | ✅ distils shots to a rule | no-op |
+| O17 ContextPruning | ✅ few-shot paragraphs protected | ✅ operates on instruction only |
+| O23–O26, O28 | ✅ | ✅ |
+
+When using `compress_field="prompt_0shot"`, the effective search space is reduced from 28 to ~24 operators.
+
+### Model compatibility
+
+The `"prompt"` field's format depends on how the dataset is loaded. The `"prompt_0shot"` field is **always plain text** regardless of model type (the chat template is intentionally not applied to it, so transformations always operate on a readable string).
+
+| Model type | `compress_field="prompt"` | `compress_field="prompt_0shot"` |
+|---|---|---|
+| Base HF (GPT-2, Mistral-7B, …) | ✅ plain text, all operators work | ✅ |
+| HF instruct/chat (Llama-3-Instruct, Qwen-chat, …) | ⚠️ chat-template markup in `prompt`; structural operators may mangle special tokens | ✅ recommended |
+| ChatGPT / OpenAI chat API | ❌ `prompt` is JSON-encoded when `apply_chat_template=True`; transformations cannot parse it sensibly | ✅ required |
+
+**Rule of thumb**: use `compress_field="prompt_0shot"` for any instruct or chat model. Use `compress_field="prompt"` (or omit it) for base/completion models.
+
 ### Code example
 
 ```python
@@ -145,6 +172,27 @@ result  = Experiment(config, eval_dataset,
 Corpus-only fitters (no LLM needed): O3, O5, O17, O18, O21, O22.
 LLM-backed fitters (pass `backend=` to the constructor): O4, O10, O15, O28.
 
+### Boundary detection
+
+When compressing full prompts that include few-shot demonstrations, the fitter needs to know where the fixed few-shot block ends and the per-sample question begins, so that operators like `ContextPruning` (O17) do not prune the demonstration paragraphs.
+
+`DatasetVocabularyFitter.fit_boundary()` detects this boundary automatically via the **longest common prefix** (LCP) across all corpus texts:
+
+```python
+fitter = DatasetVocabularyFitter(
+    train_dataset,
+    compress_field="prompt",      # full-prompt compression
+    template_field="prompt_0shot",
+)
+prefix_text, n_paragraphs = fitter.fit_boundary()
+# prefix_text  — the shared instruction + few-shot block
+# n_paragraphs — number of blank-line-separated paragraphs to protect
+```
+
+The LCP approach uses every sample in the corpus (unlike the older fallback, which only inspected the first sample) and does not require `template_field` to be set — it derives the boundary purely from observed text divergence. It works correctly for base HF models and for `compress_field="prompt_0shot"` with any model type.
+
+`fit_boundary()` is called automatically inside `fit_context_pruning()` and `make_transformation_factory()`, so in most cases you do not need to call it directly. The `template_field` fallback (substring search on the first sample) is retained for corpora where all samples happen to be identical, which makes the LCP degenerate.
+
 ## CLI
 
 ```bash
@@ -188,3 +236,5 @@ Both scripts load `.env` automatically, are restartable (completed runs are skip
 
 - `notebooks/example.ipynb` — basic API walkthrough with a synthetic dataset
 - `notebooks/example_llm.ipynb` — full pipeline with an lm-eval task and HF model
+- `notebooks/example_llm_complex.ipynb` — multi-run scenario with fitting, few-shot compression, and baselines
+- `notebooks/example_chatgpt.ipynb` — same pipeline using ChatGPT via the OpenAI chat-completions API

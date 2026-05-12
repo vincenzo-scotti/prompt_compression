@@ -25,6 +25,10 @@ class Transformation(abc.ABC):
     name: str
     #: One of "lexical", "syntactic", "structural", "semantic".
     category: str
+    #: Prompt sections this operator is meaningful for: subset of
+    #: {"instruction", "shots", "data"}.  Used by the section-aware
+    #: compression pipeline to route operators to the right section.
+    scope: frozenset[str] = frozenset()
 
     @abc.abstractmethod
     def apply(self, prompt: str) -> str:

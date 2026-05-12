@@ -24,6 +24,7 @@ class DeduplicateInstructions(Transformation):
     id = "O14"
     name = "DeduplicateInstructions"
     category = "structural"
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(self, similarity_threshold: float = 0.85) -> None:
         self._threshold = similarity_threshold
@@ -65,6 +66,7 @@ class RemovePromptHeader(Transformation):
     id = "O15"
     name = "RemovePromptHeader"
     category = "structural"
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(self, patterns: list[re.Pattern[str]] | None = None) -> None:
         self._patterns = patterns if patterns is not None else [_HEADER_LINE]
@@ -98,6 +100,7 @@ class RemoveMetaText(Transformation):
     id = "O16"
     name = "RemoveMetaText"
     category = "structural"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         for pattern in _META_PATTERNS:
@@ -138,6 +141,7 @@ class ContextPruning(Transformation):
     id = "O17"
     name = "ContextPruning"
     category = "structural"
+    scope = frozenset({"instruction", "data"})
 
     def __init__(
         self,
@@ -221,6 +225,7 @@ class SectionPruning(Transformation):
     id = "O18"
     name = "SectionPruning"
     category = "structural"
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(
         self,
@@ -263,6 +268,7 @@ class ExampleRemoval(Transformation):
     id = "O19"
     name = "ExampleRemoval"
     category = "structural"
+    scope = frozenset({"shots"})
 
     def __init__(self, n_to_remove: int = 1) -> None:
         self._n = n_to_remove
@@ -295,6 +301,7 @@ class ExampleSubsetSelection(Transformation):
     id = "O20"
     name = "ExampleSubsetSelection"
     category = "structural"
+    scope = frozenset({"shots"})
 
     def __init__(self, k: int = 2) -> None:
         self._k = k
@@ -353,6 +360,7 @@ class ExampleSimplification(Transformation):
     id = "O21"
     name = "ExampleSimplification"
     category = "structural"
+    scope = frozenset({"shots"})
 
     def __init__(
         self,
@@ -405,6 +413,7 @@ class LabelShortening(Transformation):
     id = "O22"
     name = "LabelShortening"
     category = "structural"
+    scope = frozenset({"shots"})
 
     def __init__(self, label_map: dict[str, str] | None = None) -> None:
         self._map = label_map if label_map is not None else _DEFAULT_LABEL_MAP

@@ -49,6 +49,18 @@ def _dataset(n=10, full=FULL_1FS, question=QUESTION, target="eighteen dollars"):
     ]
 
 
+def _varied_dataset(n=5, shots=FS1, target="x"):
+    """Dataset where each sample has a distinct question so the LCP ends after the shots."""
+    return [
+        {
+            "prompt": f"{shots}\n\nQuestion: Sample number {i}.\nAnswer:",
+            "prompt_0shot": f"Question: Sample number {i}.\nAnswer:",
+            "target": target,
+        }
+        for i in range(n)
+    ]
+
+
 # ---------------------------------------------------------------------------
 # _count_fewshot_paragraphs
 # ---------------------------------------------------------------------------
@@ -197,3 +209,104 @@ class TestFittedO17EndToEnd:
         # At least one anchor should appear in the question (word overlap with target)
         question_text = QUESTION.lower()
         assert any(a.search(question_text) for a in anchors) or op._n_protected == 1
+
+
+# ---------------------------------------------------------------------------
+# fit_boundary — LCP-based boundary detection
+# ---------------------------------------------------------------------------
+
+class TestFitBoundary:
+
+    def test_one_fewshot_varied_prompts(self):
+        """LCP of varied full prompts correctly identifies the 1-shot prefix."""
+        fitter = DatasetVocabularyFitter(
+            _varied_dataset(n=5, shots=FS1),
+            compress_field="prompt",
+        )
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert n_paragraphs == 1
+        assert "Jen and Tyler" in prefix_text
+
+    def test_two_fewshot_varied_prompts(self):
+        """LCP detects 2 protected paragraphs when two shots precede the question."""
+        two_shots = f"{FS1}\n\n{FS2}"
+        fitter = DatasetVocabularyFitter(
+            _varied_dataset(n=5, shots=two_shots),
+            compress_field="prompt",
+        )
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert n_paragraphs == 2
+        assert "Jen and Tyler" in prefix_text
+        assert "Four people" in prefix_text
+
+    def test_identical_prompts_degenerate(self):
+        """When all samples share the same text the LCP equals the full string —
+        no variable suffix exists so fit_boundary returns the empty result."""
+        fitter = DatasetVocabularyFitter(
+            _dataset(n=5, full=FULL_1FS),
+            compress_field="prompt",
+        )
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert prefix_text == ""
+        assert n_paragraphs == 0
+
+    def test_single_sample_degenerate(self):
+        """A corpus of one sample cannot establish an LCP boundary."""
+        fitter = DatasetVocabularyFitter(
+            _varied_dataset(n=1),
+            compress_field="prompt",
+        )
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert prefix_text == ""
+        assert n_paragraphs == 0
+
+    def test_no_blank_line_in_lcp(self):
+        """When the shared prefix contains no blank-line boundary, return empty."""
+        samples = [
+            {"prompt": f"Instruction. Question: {i}.\nAnswer:", "target": "x"}
+            for i in range(5)
+        ]
+        fitter = DatasetVocabularyFitter(samples, compress_field="prompt")
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert prefix_text == ""
+        assert n_paragraphs == 0
+
+    def test_zeroshot_field_lcp_finds_instruction_prefix(self):
+        """LCP over prompt_0shot texts finds the shared instruction before the question."""
+        samples = [
+            {
+                "prompt": f"{FS1}\n\nInstruction: solve this.\nQuestion: {i}.\nAnswer:",
+                "prompt_0shot": f"Instruction: solve this.\nQuestion: {i}.\nAnswer:",
+                "target": "x",
+            }
+            for i in range(5)
+        ]
+        fitter = DatasetVocabularyFitter(
+            samples,
+            compress_field="prompt_0shot",
+        )
+        # fit_boundary operates on compress_field=prompt_0shot texts.
+        # LCP is "Instruction: solve this.\nQuestion: " — no \n\n → ("", 0).
+        # (Single-paragraph instruction: no blank-line boundary in the shared part.)
+        prefix_text, n_paragraphs = fitter.fit_boundary()
+        assert n_paragraphs == 0  # no \n\n in the shared instruction
+
+    def test_count_fewshot_paragraphs_uses_lcp_without_template_field(self):
+        """_count_fewshot_paragraphs picks up the boundary via LCP even when
+        template_field is not supplied to the constructor."""
+        fitter = DatasetVocabularyFitter(
+            _varied_dataset(n=5, shots=FS1),
+            compress_field="prompt",
+            template_field=None,
+        )
+        n = fitter._count_fewshot_paragraphs()
+        assert n == 1
+
+    def test_count_fewshot_paragraphs_zeroshot_compression_always_zero(self):
+        """When compress_field == template_field, no prefix to protect regardless of LCP."""
+        fitter = DatasetVocabularyFitter(
+            _varied_dataset(n=5, shots=FS1),
+            compress_field="prompt_0shot",
+            template_field="prompt_0shot",
+        )
+        assert fitter._count_fewshot_paragraphs() == 0

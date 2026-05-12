@@ -17,6 +17,7 @@ that :class:`~prompt_piper.optimization.runner.Experiment` already exposes::
 
 from __future__ import annotations
 
+import os
 import random
 import re
 from collections import Counter
@@ -166,6 +167,10 @@ class DatasetVocabularyFitter:
         # in the text that operators will receive, so O17 must not protect any
         # paragraphs.  Treat template_field as inactive in that case.
         compress = compress_field or prompt_field
+        self._compress_key = compress
+        self._is_zeroshot_compression = bool(
+            template_field and compress == template_field
+        )
         self._effective_template_field = (
             template_field if template_field and template_field != compress else None
         )
@@ -743,6 +748,59 @@ class DatasetVocabularyFitter:
                 pass
         return ChunkCompression(separator=separator)
 
+    def fit_boundary(self) -> tuple[str, int]:
+        """Detect the shared instruction/few-shot prefix via longest common prefix.
+
+        Computes the LCP across all texts in ``compress_field`` (or
+        ``prompt_field`` when ``compress_field`` is unset), then snaps
+        backward to the nearest blank-line paragraph boundary (``\\n\\n``).
+
+        For full-prompt compression (``compress_field = "prompt"``), the LCP
+        captures the shared task instruction + fixed few-shot demonstrations,
+        and the returned paragraph count is the number of leading paragraphs
+        that every operator should leave untouched.
+
+        For 0-shot compression (``compress_field = "prompt_0shot"``), the LCP
+        captures the shared task-instruction prefix that appears before the
+        variable question in every sample.
+
+        This approach does not require a ``template_field`` — it derives the
+        boundary purely from the observed corpus, using all samples rather than
+        just the first one.
+
+        Returns
+        -------
+        tuple[str, int]
+            ``(prefix_text, n_paragraphs)``.  Returns ``("", 0)`` when:
+
+            * fewer than 2 samples are in the corpus,
+            * all texts are identical (the LCP equals the full text — no
+              variable suffix to distinguish the boundary),
+            * or the LCP contains no ``\\n\\n`` boundary to snap to.
+        """
+        texts = [str(s.get(self._compress_key, "")) for s in self._corpus]
+        if len(texts) < 2:
+            return "", 0
+
+        lcp = os.path.commonprefix(texts)
+
+        # Degenerate: empty LCP or every sample is identical (no variable part).
+        if not lcp or lcp == texts[0]:
+            return "", 0
+
+        # Snap backward to the last blank-line boundary within the LCP so we
+        # never cut mid-paragraph.
+        boundary = lcp.rfind("\n\n")
+        if boundary == -1:
+            return "", 0
+
+        prefix_text = lcp[:boundary]
+        if not prefix_text.strip():
+            return "", 0
+
+        n_paragraphs = len([p for p in re.split(r"\n{2,}", prefix_text) if p.strip()])
+        return prefix_text, n_paragraphs
+
     # ------------------------------------------------------------------
     # Private LLM helpers
     # ------------------------------------------------------------------
@@ -1077,17 +1135,29 @@ class DatasetVocabularyFitter:
     def _count_fewshot_paragraphs(self) -> int:
         """Count blank-line-separated paragraphs that form the few-shot prefix.
 
-        Uses the first corpus sample to find where the 0-shot question starts
-        inside the full prompt.  Everything before that point is the few-shot
-        block; its paragraph count is returned so :class:`ContextPruning` can
-        protect it from pruning.
+        Primary strategy: :meth:`fit_boundary` — derives the boundary from the
+        longest common prefix across all corpus texts, requiring no
+        ``template_field``.
 
-        Returns 0 when the effective template field is not set (either because
-        ``template_field`` was not supplied, or because ``compress_field``
-        equals ``template_field`` meaning there is no prefix to protect), or
-        when the 0-shot text cannot be located inside the full prompt.
+        Fallback strategy: substring search — locates ``template_field`` text
+        inside the first ``prompt_field`` sample.  Only used when the LCP
+        approach returns zero (e.g. all samples are identical in the test suite,
+        or the corpus is too small to produce a meaningful LCP).
+
+        Returns 0 when ``compress_field`` equals ``template_field`` (0-shot
+        compression: the prefix is not present in the text transformations
+        receive) or when neither strategy can locate a boundary.
         """
-        if self._effective_template_field is None or not self._corpus:
+        if self._is_zeroshot_compression or not self._corpus:
+            return 0
+
+        # Primary: LCP across all samples — no template_field required.
+        _, n = self.fit_boundary()
+        if n > 0:
+            return n
+
+        # Fallback: substring search on the first sample (requires template_field).
+        if self._effective_template_field is None:
             return 0
         sample = self._corpus[0]
         full = str(sample.get(self._prompt_field, ""))
