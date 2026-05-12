@@ -24,6 +24,7 @@ class RemoveExtraWhitespace(Transformation):
     id = "O1"
     name = "RemoveExtraWhitespace"
     category = "lexical"
+    scope = frozenset({"instruction", "shots", "data"})
 
     def apply(self, prompt: str) -> str:
         # Collapse runs of spaces/tabs to a single space and strip each line.
@@ -52,6 +53,7 @@ class TrimSpaces(Transformation):
     id = "O2"
     name = "TrimSpaces"
     category = "lexical"
+    scope = frozenset({"instruction", "shots", "data"})
 
     def apply(self, prompt: str) -> str:
         lines = [line.strip() for line in prompt.splitlines()]
@@ -101,6 +103,7 @@ class RemoveStopwords(Transformation):
     id = "O3"
     name = "RemoveStopwords"
     category = "lexical"
+    scope = frozenset({"instruction"})
 
     def __init__(self, stopwords: frozenset[str] | None = None) -> None:
         self._stopwords = stopwords if stopwords is not None else _STOPWORDS
@@ -150,6 +153,7 @@ class ReplaceWithShortSynonym(Transformation):
     id = "O4"
     name = "ReplaceWithShortSynonym"
     category = "lexical"
+    scope = frozenset({"instruction"})
 
     def __init__(self, synonyms: list[tuple[re.Pattern[str], str]] | None = None) -> None:
         self._synonyms = synonyms if synonyms is not None else _SHORT_SYNONYMS
@@ -195,6 +199,7 @@ class AbbreviationSubstitution(Transformation):
     id = "O5"
     name = "AbbreviationSubstitution"
     category = "lexical"
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(self, abbreviations: list[tuple[re.Pattern[str], str]] | None = None) -> None:
         self._abbreviations = abbreviations if abbreviations is not None else _ABBREVIATIONS
@@ -233,6 +238,7 @@ class SymbolSubstitution(Transformation):
     id = "O6"
     name = "SymbolSubstitution"
     category = "lexical"
+    scope = frozenset({"instruction"})
 
     def __init__(self, symbols: list[tuple[re.Pattern[str], str]] | None = None) -> None:
         self._symbols = symbols if symbols is not None else _SYMBOLS
@@ -288,6 +294,7 @@ class ContractionSubstitution(Transformation):
     id = "O7"
     name = "ContractionSubstitution"
     category = "lexical"
+    scope = frozenset({"instruction"})
 
     def __init__(self, contractions: list[tuple[re.Pattern[str], str]] | None = None) -> None:
         self._contractions = contractions if contractions is not None else _CONTRACTIONS
@@ -323,6 +330,7 @@ class RemovePolitenessMarkers(Transformation):
     id = "O8"
     name = "RemovePolitenessMarkers"
     category = "lexical"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         for pattern in _POLITENESS_PATTERNS:

@@ -57,6 +57,9 @@ __all__ = [
     "Transformation",
     # Fitting
     "DatasetVocabularyFitter",
+    # Sections
+    "PromptSections",
+    "PromptSplitter",
     # Lexical
     "RemoveExtraWhitespace",   # O1
     "TrimSpaces",              # O2
@@ -89,7 +92,14 @@ __all__ = [
     "SchemaEncoding",          # O26
     "ExampleDistillation",     # O27
     "ChunkCompression",        # O28
+    # Scope-grouped lists
+    "ALL_TRANSFORMATIONS",
+    "INSTRUCTION_OPS",
+    "SHOT_OPS",
+    "DATA_OPS",
 ]
+
+from prompt_piper.transformations.sections import PromptSections, PromptSplitter
 
 # Ordered list of all transformations matching paper table order.
 ALL_TRANSFORMATIONS: list[type[Transformation]] = [
@@ -121,4 +131,15 @@ ALL_TRANSFORMATIONS: list[type[Transformation]] = [
     SchemaEncoding,
     ExampleDistillation,
     ChunkCompression,
+]
+
+# Scope-filtered operator lists (preserve paper-table order within each group).
+INSTRUCTION_OPS: list[type[Transformation]] = [
+    cls for cls in ALL_TRANSFORMATIONS if "instruction" in cls.scope
+]
+SHOT_OPS: list[type[Transformation]] = [
+    cls for cls in ALL_TRANSFORMATIONS if "shots" in cls.scope
+]
+DATA_OPS: list[type[Transformation]] = [
+    cls for cls in ALL_TRANSFORMATIONS if "data" in cls.scope
 ]

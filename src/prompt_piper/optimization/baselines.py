@@ -50,7 +50,7 @@ class BaselineResult:
 
 
 def _names_from_bits(bits: np.ndarray, problem: PromptCompressionProblem) -> list[str]:
-    return [t.name for t, b in zip(problem._transforms, bits) if b]
+    return problem.names_from_bits(bits)
 
 
 def _is_dominated(f: np.ndarray, population: np.ndarray) -> bool:
@@ -277,7 +277,7 @@ class SummarizationBaseline:
         avg_tokens, avg_perf = problem.score_solution(bits)
         solutions = bits[np.newaxis, :]
         objectives = np.array([[avg_tokens, avg_perf]])
-        names = [_names_from_bits(bits, problem)]
+        names = [problem.names_from_bits(bits)]
         return BaselineResult(
             name=self.name,
             solutions=solutions,

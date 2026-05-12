@@ -27,6 +27,7 @@ class SentenceMerge(Transformation):
     id = "O9"
     name = "SentenceMerge"
     category = "syntactic"
+    scope = frozenset({"instruction"})
 
     def __init__(self, max_words: int = _SHORT_SENTENCE_THRESHOLD) -> None:
         self._max_words = max_words
@@ -94,6 +95,7 @@ class ImperativeRewrite(Transformation):
     id = "O10"
     name = "ImperativeRewrite"
     category = "syntactic"
+    scope = frozenset({"instruction"})
 
     def __init__(
         self,
@@ -125,6 +127,7 @@ class EnumerationCompression(Transformation):
     id = "O11"
     name = "EnumerationCompression"
     category = "syntactic"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         lines = prompt.splitlines()
@@ -173,6 +176,7 @@ class ClauseDeletion(Transformation):
     id = "O12"
     name = "ClauseDeletion"
     category = "syntactic"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         for pattern in _CLAUSE_PATTERNS:
@@ -216,6 +220,7 @@ class SentenceSimplification(Transformation):
     id = "O13"
     name = "SentenceSimplification"
     category = "syntactic"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         for pattern, replacement in _SIMPLIFICATION_PATTERNS:

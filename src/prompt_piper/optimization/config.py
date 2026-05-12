@@ -57,5 +57,11 @@ class ExperimentConfig:
     # --- Search space ---
     transformation_ids: list[str] | None = None  # None → all 28
 
+    # --- Section-aware compression ---
+    #: When True (default), also compress the per-sample input data section.
+    #: When False, the input data section is passed through unchanged and no
+    #: data-scoped operator bits are included in the search vector.
+    compress_input_data: bool = True
+
     # --- Misc ---
     verbose: bool = False

@@ -59,6 +59,7 @@ class ContextCompression(Transformation):
     id = "O23"
     name = "ContextCompression"
     category = "semantic"
+    scope = frozenset({"data"})
 
     def __init__(
         self,
@@ -116,6 +117,7 @@ class InstructionSummarization(Transformation):
     id = "O24"
     name = "InstructionSummarization"
     category = "semantic"
+    scope = frozenset({"instruction"})
 
     def __init__(
         self,
@@ -181,6 +183,7 @@ class InstructionAbstraction(Transformation):
     id = "O25"
     name = "InstructionAbstraction"
     category = "semantic"
+    scope = frozenset({"instruction"})
 
     def __init__(
         self,
@@ -249,6 +252,7 @@ class SchemaEncoding(Transformation):
     id = "O26"
     name = "SchemaEncoding"
     category = "semantic"
+    scope = frozenset({"instruction"})
 
     def apply(self, prompt: str) -> str:
         for pattern, replacement in _OUTPUT_FORMAT_PATTERNS:
@@ -279,6 +283,7 @@ class ExampleDistillation(Transformation):
     id = "O27"
     name = "ExampleDistillation"
     category = "semantic"
+    scope = frozenset({"shots"})
 
     def __init__(
         self,
@@ -338,6 +343,7 @@ class ChunkCompression(Transformation):
     id = "O28"
     name = "ChunkCompression"
     category = "semantic"
+    scope = frozenset({"instruction", "shots", "data"})
 
     def __init__(
         self,
