@@ -7,7 +7,7 @@ YAML schema example
 .. code-block:: yaml
 
     model:
-      type: hf                              # hf | openai | vllm
+      type: hf                              # hf | openai | openai-chat-completions | vllm | gemini
       name: mistralai/Mistral-7B-Instruct-v0.3
       kwargs:                               # forwarded to model constructor
         device: cuda

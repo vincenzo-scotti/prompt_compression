@@ -69,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- Model -------------------------------------------------------------
     model = p.add_argument_group("model")
     model.add_argument("--model-type", metavar="TYPE",
-                       help="lm-eval model type: hf | openai | vllm")
+                       help="lm-eval model type: hf | openai | openai-chat-completions | vllm | gemini")
     model.add_argument("--model-name", metavar="NAME",
                        help="Model identifier (HuggingFace name, OpenAI string, …)")
     model.add_argument("--model-arg", metavar="KEY=VALUE", action="append",

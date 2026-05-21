@@ -84,9 +84,44 @@ def _load_model(model_type: str, model_name: str, **kwargs):
     if model_type == "vllm":
         from lm_eval.models.vllm_causallms import VLLM
         return VLLM(pretrained=model_name, **kwargs)
+    if model_type == "gemini":
+        import os as _os
+        from lm_eval.models.openai_completions import LocalChatCompletion, OpenAIChatCompletion
+
+        _GEMINI_BASE_URL = (
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        )
+
+        class _GeminiChatCompletion(OpenAIChatCompletion):
+            def __init__(self, base_url=_GEMINI_BASE_URL, **kw):
+                super().__init__(base_url=base_url, **kw)
+
+            @property
+            def api_key(self):
+                key = _os.environ.get("GEMINI_API_KEY")
+                if key is None:
+                    raise ValueError(
+                        "GEMINI_API_KEY environment variable is not set."
+                    )
+                return key
+
+            def _create_payload(
+                self, messages, generate=False, gen_kwargs=None,
+                seed=1234, eos=None, **kw
+            ):
+                # Call LocalChatCompletion._create_payload directly (uses max_tokens,
+                # no OpenAI-specific model-name heuristics that break gemini-1.5-flash)
+                payload = LocalChatCompletion._create_payload(
+                    self, messages, generate=generate, gen_kwargs=gen_kwargs,
+                    seed=seed, eos=eos, **kw
+                )
+                payload.pop("seed", None)
+                return payload
+
+        return _GeminiChatCompletion(model=model_name, **kwargs)
     raise ValueError(
         f"Unknown model type {model_type!r}. "
-        "Supported: 'hf'/'huggingface', 'openai', 'vllm'."
+        "Supported: 'hf'/'huggingface', 'openai', 'openai-chat-completions', 'vllm', 'gemini'."
     )
 
 
