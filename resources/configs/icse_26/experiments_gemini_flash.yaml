@@ -1,0 +1,208 @@
+# ICSE'26 — Full Benchmark Suite — gemini-3-flash-preview (Google Gemini API)
+#
+# Mirrors experiments_gpt.yaml for the Gemini Flash model.
+# The Gemini backend handles chat formatting internally; apply_chat_template
+# and fewshot_as_multiturn must be false (same pattern as OpenAI chat models).
+#
+# Tasks (5 benchmarks — identical to GPT config):
+#   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
+#   bbh_cot_fewshot_logical_deduction_seven_objects,
+#   leaderboard_musr_murder_mysteries
+#
+# Requires: GOOGLE_API_KEY (or GEMINI_API_KEY, whichever the backend expects)
+# mbpp_instruct also requires: HF_ALLOW_CODE_EVAL=1
+
+model:
+  type: gemini
+  name: gemini-3-flash-preview
+  kwargs:
+    # Gemini supports concurrent requests; 4 is a safe default for Flash.
+    num_concurrent: 4
+
+output:
+  dir: ./results/icse_26/gemini-3-flash-preview
+  overwrite: false
+
+defaults:
+  compress_field: prompt_0shot
+
+  # Gemini API manages chat formatting; disable lm-eval template application.
+  apply_chat_template: false
+  fewshot_as_multiturn: false
+
+  use_fitting: true
+  use_llm_for_semantic: true
+
+  n_search: 20
+  n_test: 50
+  algorithm: nsga2
+  pop_size: 20
+  n_gen: 20
+
+  seed: 42
+  subset_seed: 42
+
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  extra_stop_sequences: null
+
+  metric_key: null
+  search_split: test
+  test_split: test
+
+
+# ── Transferability analysis ────────────────────────────────────────────────
+transferability:
+  enabled: true
+  pairs:
+    - [gsm8k_cot_nsga2, bbh_logical_deduction_nsga2]
+    - [bbh_logical_deduction_nsga2, gsm8k_cot_nsga2]
+
+
+runs:
+
+  # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
+  - name: mbpp_instruct_nsga2
+    task: mbpp_instruct
+    algorithm: nsga2
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+
+  - name: mbpp_instruct_mab
+    task: mbpp_instruct
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
+  - name: mmlu_pro_cs_nsga2
+    task: mmlu_pro_computer_science
+    algorithm: nsga2
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: mmlu_pro_cs_mab
+    task: mmlu_pro_computer_science
+    algorithm: mab
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
+  # metric_key: flexible-extract — more appropriate than exact_match for
+  # open-ended generation (handles paraphrased numeric answers).
+  - name: gsm8k_cot_nsga2
+    task: gsm8k_cot
+    algorithm: nsga2
+    num_fewshot: 8
+    metric_key: flexible-extract
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: gsm8k_cot_mab
+    task: gsm8k_cot
+    algorithm: mab
+    num_fewshot: 8
+    metric_key: flexible-extract
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ BBH – Logical Deduction ════
+  - name: bbh_logical_deduction_nsga2
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: nsga2
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: bbh_logical_deduction_mab
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
+  - name: musr_murder_mysteries_nsga2
+    task: leaderboard_musr_murder_mysteries
+    algorithm: nsga2
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
+
+  - name: musr_murder_mysteries_mab
+    task: leaderboard_musr_murder_mysteries
+    algorithm: mab
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion

@@ -199,18 +199,22 @@ class Experiment:
         baselines: list[str] | None = None,
         callback=None,
     ) -> ExperimentResult:
-        """Run the evolutionary search and optionally one or more baselines.
+        """Run the search and optionally one or more baselines.
+
+        When ``config.algorithm == "mab"``, the Multi-Armed Bandit (Thompson
+        Sampling) search is used as the primary algorithm instead of a pymoo
+        evolutionary algorithm.  In that case *callback* is ignored and
+        ``ExperimentResult.generation_history`` will be empty.
 
         Parameters
         ----------
         baselines:
             List of baseline names to run alongside the main search.
-            Supported: ``"no_compression"``, ``"all_transformations"``,
-            ``"random_search"``.  Pass ``None`` (default) to skip baselines.
+            Pass ``None`` (default) to skip baselines.
         callback:
             Optional pymoo :class:`~pymoo.core.callback.Callback` instance
-            injected into the ``minimize`` call (e.g. for per-generation
-            history tracking).
+            for per-generation history tracking.  Ignored when algorithm is
+            ``"mab"``.
 
         Returns
         -------
@@ -218,6 +222,10 @@ class Experiment:
         """
         dataset_subset = self._sample_subset()
         problem = self._build_problem(dataset_subset)
+
+        if self.config.algorithm == "mab":
+            return self._run_mab(problem, baselines)
+
         algorithm = build_algorithm(
             self.config.algorithm,
             n_var=problem.n_var,
@@ -260,6 +268,51 @@ class Experiment:
             baselines=baseline_results,
             baseline_elapsed=baseline_elapsed,
             generation_history=history,
+        )
+
+    def _run_mab(
+        self,
+        problem: PromptCompressionProblem,
+        baselines: list[str] | None,
+    ) -> ExperimentResult:
+        """Run Multi-Armed Bandit (Thompson Sampling) as the primary search.
+
+        Uses the same evaluation budget as the evolutionary approach:
+        ``pop_size × n_gen`` evaluations.  Baselines are run on the same
+        problem instance afterward.
+        """
+        n_eval = self.config.pop_size * self.config.n_gen
+        mab = MultiArmedBanditBaseline(
+            n_evaluations=n_eval,
+            seed=self.config.seed,
+        )
+
+        t0 = time.perf_counter()
+        mab_result = mab.run(problem)
+        elapsed = time.perf_counter() - t0
+
+        pareto_solutions = mab_result.solutions      # (n_pareto, n_var)
+        pareto_objectives = mab_result.objectives    # (n_pareto, 2): [tokens, +perf]
+        pareto_names = mab_result.transformation_names
+
+        baseline_results: dict[str, BaselineResult] = {}
+        baseline_elapsed: dict[str, float] = {}
+        if baselines:
+            for name in baselines:
+                t_bl = time.perf_counter()
+                baseline_results[name] = self.run_baseline(name, problem)
+                baseline_elapsed[name] = time.perf_counter() - t_bl
+
+        return ExperimentResult(
+            config=self.config,
+            pareto_solutions=pareto_solutions,
+            pareto_objectives=pareto_objectives,
+            pareto_transformation_names=pareto_names,
+            pymoo_result=None,
+            elapsed_time=elapsed,
+            baselines=baseline_results,
+            baseline_elapsed=baseline_elapsed,
+            generation_history=[],
         )
 
     def evaluate_solutions(

@@ -126,11 +126,54 @@ class PromptCompressionProblem(Problem):
     # ------------------------------------------------------------------
 
     def _evaluate(self, x: np.ndarray, out: dict, *args, **kwargs) -> None:
-        F = np.empty((len(x), 2), dtype=float)
-        for i, bits in enumerate(x):
-            avg_tokens, avg_perf = self._score_bits(bits)
-            F[i, 0] = avg_tokens
-            F[i, 1] = -avg_perf
+        """Evaluate all solutions in a generation with deduplication.
+
+        All compressed texts for every solution in the population are
+        collected first, then deduplicated on (sample_index, text) before
+        a single :meth:`Evaluator.evaluate_batch` call.  This avoids
+        redundant LLM evaluations when multiple solutions produce identical
+        compressed output for the same sample (e.g. the identity solution
+        appearing in many individuals).
+        """
+        n_solutions = len(x)
+
+        # Phase 1: compress without evaluating
+        per_solution: list[tuple[list[str], list[str]]] = []
+        for bits in x:
+            originals, compressed = self._compress_bits(bits)
+            per_solution.append((originals, compressed))
+
+        # Phase 2: build deduplicated batch
+        key_to_eval_idx: dict[tuple, int] = {}
+        unique_originals: list[str] = []
+        unique_compressed: list[str] = []
+        unique_docs: list[dict] = []
+
+        for originals, compressed in per_solution:
+            for j, (orig, comp) in enumerate(zip(originals, compressed)):
+                key = (j, comp)
+                if key not in key_to_eval_idx:
+                    key_to_eval_idx[key] = len(unique_compressed)
+                    unique_originals.append(orig)
+                    unique_compressed.append(comp)
+                    unique_docs.append(self._dataset[j] if j < len(self._dataset) else {})
+
+        # Phase 3: single batch evaluation
+        unique_perfs = self._evaluator.evaluate_batch(
+            unique_originals, unique_compressed, unique_docs
+        )
+
+        # Phase 4: reconstruct per-solution objectives
+        F = np.empty((n_solutions, 2), dtype=float)
+        for i, (originals, compressed) in enumerate(per_solution):
+            n = len(originals)
+            total_tokens = sum(self._tokenizer.count(c) for c in compressed)
+            total_perf = sum(
+                unique_perfs[key_to_eval_idx[(j, comp)]]
+                for j, comp in enumerate(compressed)
+            )
+            F[i, 0] = total_tokens / n
+            F[i, 1] = -(total_perf / n)
         out["F"] = F
 
     # ------------------------------------------------------------------
@@ -173,13 +216,32 @@ class PromptCompressionProblem(Problem):
     # ------------------------------------------------------------------
 
     def _score_bits(self, bits) -> tuple[float, float]:
+        originals, compressed = self._compress_bits(bits)
+        n = max(len(originals), 1)
+        total_tokens = sum(self._tokenizer.count(c) for c in compressed)
+        perfs = self._evaluator.evaluate_batch(originals, compressed, self._dataset)
+        return total_tokens / n, sum(perfs) / n
+
+    # ---------- Compression (no evaluation) ----------
+
+    def _compress_bits(self, bits) -> tuple[list[str], list[str]]:
+        """Return ``(originals, compressed_texts)`` for *bits* without evaluating."""
         if self._sections is not None:
-            return self._score_sections(bits)
-        return self._score_pipeline_flat(bits)
+            return self._compress_bits_sections(bits)
+        return self._compress_bits_flat(bits)
 
-    # ---------- Section-aware scoring ----------
+    def _compress_bits_flat(self, bits) -> tuple[list[str], list[str]]:
+        pipeline = [t for t, b in zip(self._transforms, bits) if b]
+        originals = [s[self._compress_field] for s in self._dataset]
+        compressed: list[str] = []
+        for original in originals:
+            text = original
+            for transform in pipeline:
+                text = transform(text)
+            compressed.append(text)
+        return originals, compressed
 
-    def _score_sections(self, bits) -> tuple[float, float]:
+    def _compress_bits_sections(self, bits) -> tuple[list[str], list[str]]:
         n_i = len(self._instruction_ops)
         n_s = len(self._shot_ops)
 
@@ -187,35 +249,12 @@ class PromptCompressionProblem(Problem):
         shots_bits = tuple(int(b) for b in bits[n_i:n_i + n_s])
         data_bits = list(bits[n_i + n_s:])
 
-        # Static compression (same for all samples) — cached.
-        static_key = (instruction_bits, shots_bits)
-        if static_key not in self._static_cache:
-            instr_pipeline = [
-                op for op, b in zip(self._instruction_ops, instruction_bits) if b
-            ]
-            shot_pipeline = [
-                op for op, b in zip(self._shot_ops, shots_bits) if b
-            ]
-            # Use the first section's static text (shared across all samples).
-            base_instruction = self._sections[0].instruction if self._sections else ""
-            base_shots = self._sections[0].shots if self._sections else ""
-            c_instr = base_instruction
-            for op in instr_pipeline:
-                c_instr = op(c_instr)
-            c_shots = base_shots
-            for op in shot_pipeline:
-                c_shots = op(c_shots)
-            self._static_cache[static_key] = (c_instr, c_shots)
+        c_instr, c_shots = self._get_static_compressed(instruction_bits, shots_bits)
 
-        c_instr, c_shots = self._static_cache[static_key]
-
-        # Dynamic per-sample compression.
-        data_pipeline = [
-            op for op, b in zip(self._data_ops, data_bits) if b
-        ]
+        data_pipeline = [op for op, b in zip(self._data_ops, data_bits) if b]
         compressed_texts: list[str] = []
         originals: list[str] = []
-        for section in self._sections:
+        for section in self._sections:  # type: ignore[union-attr]
             c_data = section.input_data
             for op in data_pipeline:
                 c_data = op(c_data)
@@ -226,27 +265,32 @@ class PromptCompressionProblem(Problem):
             )
             compressed_texts.append(assembled)
             originals.append(section.assemble())
+        return originals, compressed_texts
 
-        total_tokens = sum(self._tokenizer.count(c) for c in compressed_texts)
-        perfs = self._evaluator.evaluate_batch(originals, compressed_texts, self._dataset)
-        n = max(len(self._sections), 1)
-        return total_tokens / n, sum(perfs) / n
-
-    # ---------- Legacy flat scoring ----------
-
-    def _score_pipeline_flat(self, bits) -> tuple[float, float]:
-        pipeline = [t for t, b in zip(self._transforms, bits) if b]
-        originals = [s[self._compress_field] for s in self._dataset]
-        compressed_texts: list[str] = []
-        for original in originals:
-            text = original
-            for transform in pipeline:
-                text = transform(text)
-            compressed_texts.append(text)
-        total_tokens = sum(self._tokenizer.count(c) for c in compressed_texts)
-        perfs = self._evaluator.evaluate_batch(originals, compressed_texts, self._dataset)
-        n = max(len(self._dataset), 1)
-        return total_tokens / n, sum(perfs) / n
+    def _get_static_compressed(
+        self,
+        instruction_bits: tuple,
+        shots_bits: tuple,
+    ) -> tuple[str, str]:
+        """Return ``(compressed_instruction, compressed_shots)`` from cache."""
+        static_key = (instruction_bits, shots_bits)
+        if static_key not in self._static_cache:
+            instr_pipeline = [
+                op for op, b in zip(self._instruction_ops, instruction_bits) if b
+            ]
+            shot_pipeline = [
+                op for op, b in zip(self._shot_ops, shots_bits) if b
+            ]
+            base_instruction = self._sections[0].instruction if self._sections else ""  # type: ignore[index]
+            base_shots = self._sections[0].shots if self._sections else ""  # type: ignore[index]
+            c_instr = base_instruction
+            for op in instr_pipeline:
+                c_instr = op(c_instr)
+            c_shots = base_shots
+            for op in shot_pipeline:
+                c_shots = op(c_shots)
+            self._static_cache[static_key] = (c_instr, c_shots)
+        return self._static_cache[static_key]
 
     # ------------------------------------------------------------------
     # Helpers for baselines / runner

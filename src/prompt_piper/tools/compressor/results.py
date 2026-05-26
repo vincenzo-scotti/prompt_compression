@@ -14,6 +14,51 @@ from typing import Any
 
 
 # ---------------------------------------------------------------------------
+# Transferability result
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TransferabilityEval:
+    """Cross-task transferability result for one (source, target) pair.
+
+    Attributes
+    ----------
+    source_run:
+        Name of the run whose Pareto solutions are being transferred.
+    target_run:
+        Name of the run whose test dataset is used for evaluation.
+    timestamp:
+        ISO-8601 UTC timestamp when the analysis ran.
+    solutions:
+        Source Pareto solutions re-evaluated on the target task's test data.
+        Each entry mirrors :class:`SolutionEval` but test objectives reflect
+        the *target* task.
+    """
+
+    source_run: str
+    target_run: str
+    timestamp: str
+    solutions: list[SolutionEval]
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def save(self, path: str | Path) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(self.to_dict(), f, indent=2, default=str)
+        return path
+
+    @classmethod
+    def load(cls, path: str | Path) -> "TransferabilityEval":
+        with open(path) as f:
+            d = json.load(f)
+        d["solutions"] = [SolutionEval(**s) for s in d["solutions"]]
+        return cls(**d)
+
+
+# ---------------------------------------------------------------------------
 # Solution-level result
 # ---------------------------------------------------------------------------
 

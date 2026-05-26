@@ -16,7 +16,7 @@ from prompt_piper.transformations import ALL_TRANSFORMATIONS
 
 from .callback import GenerationCallback
 from .config import CompressorConfig, RunConfig
-from .results import BaselineEval, CompressorResult, SolutionEval
+from .results import BaselineEval, CompressorResult, SolutionEval, TransferabilityEval
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,9 @@ class CompressorRunner:
         Restartable: if ``output.overwrite`` is ``False`` and a result file
         ``{output_dir}/{run_name}.json`` already exists, that run is skipped
         and the existing result is loaded instead.
+
+        After all primary runs complete, performs transferability analysis if
+        ``config.transferability.enabled`` is ``True``.
         """
         if not self._config.runs:
             raise ValueError("No runs defined in config.")
@@ -81,6 +84,10 @@ class CompressorRunner:
             except Exception:
                 logger.exception("Run %s failed", run_cfg.run_name)
                 raise
+
+        if self._config.transferability.enabled and self._config.transferability.pairs:
+            self.run_transferability()
+
         return results
 
     def run_single(self, run_cfg: RunConfig) -> CompressorResult:
@@ -282,6 +289,149 @@ class CompressorRunner:
             extra={"dry_run": self._dry_run, "baselines_only": True},
             fitting_report=fitting_report,
             fitting_elapsed_seconds=fitting_elapsed,
+        )
+
+    # ------------------------------------------------------------------
+    # Transferability analysis
+    # ------------------------------------------------------------------
+
+    def run_transferability(self) -> list[TransferabilityEval]:
+        """Evaluate Pareto solutions from one run on another run's test dataset.
+
+        For each ``(source_run, target_run)`` pair in
+        ``config.transferability.pairs``:
+
+        1. Load the source run's result file to obtain its Pareto bit vectors.
+        2. Use the target run's ``RunConfig`` to build a backend and fetch the
+           test dataset.
+        3. Evaluate each source solution on the target task and save the result
+           as ``{output_dir}/transfer_{source_run}_to_{target_run}.json``.
+
+        Skips a pair if the output file already exists (respects
+        ``output.overwrite``).
+
+        Returns a list of :class:`~results.TransferabilityEval` objects.
+        """
+        out_dir = Path(self._config.output.dir)
+        run_map = {r.run_name: r for r in self._config.runs}
+        evals: list[TransferabilityEval] = []
+
+        for pair in self._config.transferability.pairs:
+            source_name, target_name = pair[0], pair[1]
+            out_path = out_dir / f"transfer_{source_name}_to_{target_name}.json"
+
+            if not self._config.output.overwrite and out_path.exists():
+                logger.info(
+                    "Skipping transferability %s → %s (result exists)",
+                    source_name, target_name,
+                )
+                try:
+                    evals.append(TransferabilityEval.load(out_path))
+                except Exception:
+                    pass
+                continue
+
+            source_result_path = out_dir / f"{source_name}.json"
+            if not source_result_path.exists():
+                logger.warning(
+                    "Transferability skipped: source result not found at %s",
+                    source_result_path,
+                )
+                continue
+
+            if target_name not in run_map:
+                logger.warning(
+                    "Transferability skipped: target run %r not in config.runs",
+                    target_name,
+                )
+                continue
+
+            logger.info(
+                "Transferability: evaluating %s solutions on %s",
+                source_name, target_name,
+            )
+            try:
+                te = self._evaluate_transfer(
+                    source_name=source_name,
+                    source_result_path=source_result_path,
+                    target_run_cfg=run_map[target_name],
+                    transform_classes=self._resolve_transforms(run_map[target_name]),
+                )
+                te.save(out_path)
+                logger.info("Saved transferability result → %s", out_path)
+                evals.append(te)
+            except Exception:
+                logger.exception(
+                    "Transferability %s → %s failed", source_name, target_name
+                )
+
+        return evals
+
+    def _evaluate_transfer(
+        self,
+        source_name: str,
+        source_result_path: Path,
+        target_run_cfg: RunConfig,
+        transform_classes,
+    ) -> TransferabilityEval:
+        """Run the actual cross-task evaluation for one pair."""
+        from prompt_piper.optimization.runner import Experiment
+
+        source_result = CompressorResult.load(source_result_path)
+        if not source_result.pareto_solutions:
+            logger.warning("Source %s has no Pareto solutions; skipping.", source_name)
+            return TransferabilityEval(
+                source_run=source_name,
+                target_run=target_run_cfg.run_name,
+                timestamp=CompressorResult.now_timestamp(),
+                solutions=[],
+            )
+
+        # Build target backend (reuses already-loaded model)
+        target_backend = self._get_backend(target_run_cfg)
+        target_dataset = self._get_dataset(target_backend, target_run_cfg, split=target_run_cfg.test_split)
+        if target_run_cfg.n_test is not None:
+            import random
+            rng = random.Random(target_run_cfg.subset_seed + 1)
+            if target_run_cfg.n_test < len(target_dataset):
+                target_dataset = rng.sample(target_dataset, target_run_cfg.n_test)
+
+        exp_config = self._make_exp_config(target_run_cfg, n_subset=len(target_dataset))
+        exp = Experiment(
+            config=exp_config,
+            dataset=target_dataset,
+            evaluator=target_backend["evaluator"],
+            tokenizer=target_backend.get("tokenizer"),
+            transformations=transform_classes,
+            transformation_factory=target_backend.get("transformation_factory"),
+        )
+
+        # Reconstruct bit vectors from source Pareto solutions
+        import numpy as np
+        source_bits = np.array([sol.bits for sol in source_result.pareto_solutions], dtype=int)
+
+        # Evaluate on target dataset
+        target_objectives = exp.evaluate_solutions(source_bits, target_dataset)
+
+        solutions = []
+        for sol, obj in zip(source_result.pareto_solutions, target_objectives):
+            solutions.append(
+                SolutionEval(
+                    transformation_ids=sol.transformation_ids,
+                    transformation_names=sol.transformation_names,
+                    bits=sol.bits,
+                    search_avg_tokens=sol.search_avg_tokens,
+                    search_avg_performance=sol.search_avg_performance,
+                    test_avg_tokens=float(obj[0]),
+                    test_avg_performance=float(obj[1]),
+                )
+            )
+
+        return TransferabilityEval(
+            source_run=source_name,
+            target_run=target_run_cfg.run_name,
+            timestamp=CompressorResult.now_timestamp(),
+            solutions=solutions,
         )
 
     # ------------------------------------------------------------------
