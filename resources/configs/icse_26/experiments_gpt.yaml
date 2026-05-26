@@ -9,15 +9,21 @@
 # Tasks (5 benchmarks):
 #   mbpp_instruct                              — code, pass@1, 3-shot, compress instruction only
 #   mmlu_pro_computer_science                  — CS knowledge, acc (CoT), 5-shot, compress instruction only
-#   gsm8k_cot                                  — math reasoning, exact match (CoT), 8-shot, compress instruction only
+#   gsm8k_cot                                  — math reasoning, flexible-extract (CoT), 8-shot, compress instruction only
 #   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match (CoT), 3-shot, compress instruction only
 #   leaderboard_musr_murder_mysteries          — multi-step reasoning, acc_norm, 0-shot, compress full prompt
 #
-# Rough API-call budget per task:
-#   Fitting (~80 calls) + NSGA-II (~8,000 calls) + Baselines (~140 calls) + Test (~1,000 calls)
-#   Total per task: ~9,000–10,000 calls; 5 tasks: ~45,000–50,000 calls
+# Each task is run twice: once with NSGA-II (primary algorithm) and once with
+# the Multi-Armed Bandit (MAB, Thompson Sampling) as a self-contained approach.
+# MAB uses the same evaluation budget as NSGA-II (pop_size × n_gen evaluations).
 #
-# At ~1–3 s/call with num_concurrent=1: expect 15–40 h wall-clock total.
+# Transferability analysis: after all runs, Pareto solutions from gsm8k_cot_nsga2
+# are re-evaluated on bbh_logical_deduction and vice versa to measure cross-task
+# generalisation of discovered compression strategies.
+#
+# Rough API-call budget per task pair (NSGA-II + MAB):
+#   Fitting (~80) + NSGA-II (~8,000) + MAB (~8,000) + Baselines (~140) + Test (~1,000)
+#   Total per pair: ~17,000–18,000; 5 pairs: ~85,000–90,000 calls
 #
 # Requires: OPENAI_API_KEY
 # mbpp_instruct also requires: HF_ALLOW_CODE_EVAL=1
@@ -29,9 +35,9 @@ model:
     # gpt-5.4-mini does not support the 'stop' parameter; drop it from all
     # API calls (stop-based termination relies on max_gen_toks as fallback).
     drop_stop_sequences: true
-    # num_concurrent=1 uses the synchronous requests path, avoiding aiohttp
-    # DNS failures that occur intermittently under concurrent load.
-    num_concurrent: 1
+    # num_concurrent=4: run four API requests in parallel to reduce wall-clock
+    # time (safe for the chat-completions endpoint).
+    num_concurrent: 4
 
 output:
   dir: ./results/icse_26/gpt-5.4-mini-2026-03-17
@@ -55,11 +61,12 @@ defaults:
   seed: 42
   subset_seed: 42
 
+  # NSGA-II baselines — multi_armed_bandit is now a self-contained approach
+  # and runs as a separate first-class experiment (see *_mab runs below).
   baselines:
     - no_compression
     - all_transformations
     - random_search
-    - multi_armed_bandit
     - summarization
     - truncated_prompt
     - random_deletion
@@ -71,16 +78,28 @@ defaults:
   test_split: test
 
 
+# ── Transferability analysis ────────────────────────────────────────────────
+# Exchange Pareto frontiers between the two reasoning tasks (GSM8K-CoT and
+# BBH-Logical-Deduction) to measure cross-task generalisation.
+transferability:
+  enabled: true
+  pairs:
+    - [gsm8k_cot_nsga2, bbh_logical_deduction_nsga2]
+    - [bbh_logical_deduction_nsga2, gsm8k_cot_nsga2]
+
+
 runs:
 
-  # ----------------------------------------------------------- MBPP-Instruct
+  # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
   # Python programming benchmark — 500 problems, pass@1, generate_until.
   # 3-shot: instruction + 3 examples + test case.
   # compress_field=prompt_0shot: compress only the NL instruction; leave shots intact.
   # max_gen_toks: 256 — enough for a complete function body.
   # Requires: HF_ALLOW_CODE_EVAL=1
+
   - name: mbpp_instruct_nsga2
     task: mbpp_instruct
+    algorithm: nsga2
     num_fewshot: 3
     compress_field: prompt_0shot
     search_split: test
@@ -88,12 +107,31 @@ runs:
     generation_kwargs:
       max_gen_toks: 256
 
-  # ----------------------------------------------------------- MMLU-Pro (CS)
-  # Computer Science subset of MMLU-Pro — ~1,800 problems, accuracy (CoT), 5-shot.
+  - name: mbpp_instruct_mab
+    task: mbpp_instruct
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
+  # Computer Science subset of MMLU-Pro — ~1,800 problems, acc (CoT), 5-shot.
   # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
   # max_gen_toks: 1024 — enough for a CoT chain + final answer letter.
+
   - name: mmlu_pro_cs_nsga2
     task: mmlu_pro_computer_science
+    algorithm: nsga2
     num_fewshot: 5
     compress_field: prompt_0shot
     search_split: test
@@ -101,25 +139,67 @@ runs:
     generation_kwargs:
       max_gen_toks: 1024
 
-  # ----------------------------------------------------------- GSM8K-CoT
-  # Grade-school math reasoning — 1,319 test problems, exact match, 8-shot CoT.
-  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
+  - name: mmlu_pro_cs_mab
+    task: mmlu_pro_computer_science
+    algorithm: mab
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
+  # Grade-school math reasoning — 1,319 test problems, 8-shot CoT.
+  # metric_key: flexible-extract — handles paraphrased numeric answers better
+  # than strict exact_match (e.g. "The answer is 42" vs "42").
+  # compress_field=prompt_0shot: compress only the question; leave CoT shots intact.
   # max_gen_toks: 1024 — enough for a full arithmetic chain-of-thought.
+
   - name: gsm8k_cot_nsga2
     task: gsm8k_cot
+    algorithm: nsga2
     num_fewshot: 8
+    metric_key: flexible-extract
     compress_field: prompt_0shot
     search_split: test
     test_split: test
     generation_kwargs:
       max_gen_toks: 1024
 
-  # ----------------------------------------------------------- BBH – Logical Deduction
+  - name: gsm8k_cot_mab
+    task: gsm8k_cot
+    algorithm: mab
+    num_fewshot: 8
+    metric_key: flexible-extract
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ BBH – Logical Deduction ════
   # BIG-Bench Hard: order 7 objects from clues — 250 problems, exact match, 3-shot CoT.
-  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
+  # compress_field=prompt_0shot: compress only the question; leave CoT shots intact.
   # max_gen_toks: 1024 — enough for a reasoning chain + final ordered list.
+
   - name: bbh_logical_deduction_nsga2
     task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: nsga2
     num_fewshot: 3
     compress_field: prompt_0shot
     search_split: test
@@ -127,13 +207,47 @@ runs:
     generation_kwargs:
       max_gen_toks: 1024
 
-  # ----------------------------------------------------------- MuSR – Murder Mysteries
+  - name: bbh_logical_deduction_mab
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
   # Multi-step soft reasoning — 0-shot, acc_norm (loglikelihood over answer choices).
   # compress_field=null: no instruction/shots split; compress the full prompt.
   # No max_gen_toks needed: loglikelihood task, no generation.
+
   - name: musr_murder_mysteries_nsga2
     task: leaderboard_musr_murder_mysteries
+    algorithm: nsga2
     num_fewshot: 0
     compress_field: null
     search_split: test
     test_split: test
+
+  - name: musr_murder_mysteries_mab
+    task: leaderboard_musr_murder_mysteries
+    algorithm: mab
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion

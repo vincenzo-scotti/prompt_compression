@@ -164,11 +164,34 @@ _RUN_FIELDS = {f for f in RunConfig.__dataclass_fields__}
 
 
 @dataclass
+class TransferabilityConfig:
+    """Configuration for cross-task transferability analysis.
+
+    After all primary runs finish, the runner evaluates Pareto solutions
+    from a *source* run on the test dataset of a *target* run, revealing
+    whether compression strategies discovered for one task generalise to
+    another.
+
+    Parameters
+    ----------
+    enabled:
+        Set ``True`` to activate the analysis.
+    pairs:
+        List of ``[source_run_name, target_run_name]`` pairs.  Both names
+        must appear in the enclosing ``CompressorConfig.runs`` list.
+    """
+
+    enabled: bool = False
+    pairs: list[list[str]] = field(default_factory=list)
+
+
+@dataclass
 class CompressorConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
     defaults: dict[str, Any] = field(default_factory=dict)
     runs: list[RunConfig] = field(default_factory=list)
+    transferability: TransferabilityConfig = field(default_factory=TransferabilityConfig)
 
     # ------------------------------------------------------------------
     # Loaders
@@ -212,7 +235,14 @@ class CompressorConfig:
         runs_raw: list[dict] = raw.get("runs", [])
         runs = [cls._build_run(r, defaults) for r in runs_raw]
 
-        return cls(model=model, output=output, defaults=defaults, runs=runs)
+        transfer_raw = raw.get("transferability", {})
+        transferability = TransferabilityConfig(
+            enabled=transfer_raw.get("enabled", False),
+            pairs=transfer_raw.get("pairs", []),
+        )
+
+        return cls(model=model, output=output, defaults=defaults, runs=runs,
+                   transferability=transferability)
 
     @staticmethod
     def _build_run(run_raw: dict, defaults: dict) -> RunConfig:
@@ -281,4 +311,8 @@ class CompressorConfig:
                 {f: getattr(r, f) for f in _RUN_FIELDS}
                 for r in self.runs
             ],
+            "transferability": {
+                "enabled": self.transferability.enabled,
+                "pairs": self.transferability.pairs,
+            },
         }

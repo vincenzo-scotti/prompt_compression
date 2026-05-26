@@ -1,0 +1,222 @@
+# ICSE'26 — Full Benchmark Suite — google/gemma-4-26B-A4B-it (4-bit NF4, self-hosted)
+#
+# Gemma 4 26B-A4B is a Mixture-of-Experts instruction-tuned model
+# (26B total params, ~4B active per token).  4-bit NF4 quantization keeps
+# peak VRAM under ~20 GB.
+#
+# Chat template: required for Gemma instruction-tuned ("-it") variants.
+# Few-shot formatting: fewshot_as_multiturn=true formats demonstrations as
+# separate (user, assistant) turns — the recommended setup for chat models.
+# Stop sequence: Gemma uses <end_of_turn> as end-of-turn token.
+#
+# Tasks (5 benchmarks — identical to GPT config):
+#   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
+#   bbh_cot_fewshot_logical_deduction_seven_objects,
+#   leaderboard_musr_murder_mysteries
+#
+# mbpp_instruct requires: HF_ALLOW_CODE_EVAL=1
+
+model:
+  type: hf
+  name: google/gemma-4-26B-A4B-it
+  kwargs:
+    # MoE active-parameter count (~4B) allows larger batch sizes than a
+    # dense 26B model; start with 4 and adjust based on available VRAM.
+    batch_size: 4
+    max_length: 8192
+    device_map: auto
+    dtype: bfloat16
+    trust_remote_code: true
+  quantization:
+    load_in_4bit: true
+    bnb_4bit_quant_type: nf4
+    bnb_4bit_compute_dtype: bfloat16
+    bnb_4bit_use_double_quant: true
+
+output:
+  dir: ./results/icse_26/gemma-4-26b-a4b-it
+  overwrite: false
+
+defaults:
+  compress_field: prompt_0shot
+
+  # Gemma instruct models require the chat template.
+  apply_chat_template: true
+  fewshot_as_multiturn: true
+
+  use_fitting: true
+  use_llm_for_semantic: true
+
+  n_search: 20
+  n_test: 50
+  algorithm: nsga2
+  pop_size: 20
+  n_gen: 20
+
+  seed: 42
+  subset_seed: 42
+
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  # Gemma end-of-turn token — appended to the task's own stop list.
+  extra_stop_sequences: ["<end_of_turn>"]
+
+  metric_key: null
+  search_split: test
+  test_split: test
+
+
+# ── Transferability analysis ────────────────────────────────────────────────
+transferability:
+  enabled: true
+  pairs:
+    - [gsm8k_cot_nsga2, bbh_logical_deduction_nsga2]
+    - [bbh_logical_deduction_nsga2, gsm8k_cot_nsga2]
+
+
+runs:
+
+  # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
+  - name: mbpp_instruct_nsga2
+    task: mbpp_instruct
+    algorithm: nsga2
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+
+  - name: mbpp_instruct_mab
+    task: mbpp_instruct
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
+  - name: mmlu_pro_cs_nsga2
+    task: mmlu_pro_computer_science
+    algorithm: nsga2
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: mmlu_pro_cs_mab
+    task: mmlu_pro_computer_science
+    algorithm: mab
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
+  # metric_key: flexible-extract — handles paraphrased numeric answers.
+  - name: gsm8k_cot_nsga2
+    task: gsm8k_cot
+    algorithm: nsga2
+    num_fewshot: 8
+    metric_key: flexible-extract
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: gsm8k_cot_mab
+    task: gsm8k_cot
+    algorithm: mab
+    num_fewshot: 8
+    metric_key: flexible-extract
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ BBH – Logical Deduction ════
+  - name: bbh_logical_deduction_nsga2
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: nsga2
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  - name: bbh_logical_deduction_mab
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    algorithm: mab
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
+
+  # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
+  - name: musr_murder_mysteries_nsga2
+    task: leaderboard_musr_murder_mysteries
+    algorithm: nsga2
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
+
+  - name: musr_murder_mysteries_mab
+    task: leaderboard_musr_murder_mysteries
+    algorithm: mab
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
+    baselines:
+      - no_compression
+      - all_transformations
+      - random_search
+      - summarization
+      - truncated_prompt
+      - random_deletion
