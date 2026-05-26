@@ -127,7 +127,7 @@ class EnumerationCompression(Transformation):
     id = "O11"
     name = "EnumerationCompression"
     category = "syntactic"
-    scope = frozenset({"instruction"})
+    scope = frozenset({"instruction", "shots"})
 
     def apply(self, prompt: str) -> str:
         lines = prompt.splitlines()

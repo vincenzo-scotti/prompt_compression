@@ -294,7 +294,7 @@ class ContractionSubstitution(Transformation):
     id = "O7"
     name = "ContractionSubstitution"
     category = "lexical"
-    scope = frozenset({"instruction"})
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(self, contractions: list[tuple[re.Pattern[str], str]] | None = None) -> None:
         self._contractions = contractions if contractions is not None else _CONTRACTIONS

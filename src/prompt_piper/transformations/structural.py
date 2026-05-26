@@ -141,7 +141,7 @@ class ContextPruning(Transformation):
     id = "O17"
     name = "ContextPruning"
     category = "structural"
-    scope = frozenset({"instruction", "data"})
+    scope = frozenset({"instruction"})
 
     def __init__(
         self,
@@ -413,7 +413,7 @@ class LabelShortening(Transformation):
     id = "O22"
     name = "LabelShortening"
     category = "structural"
-    scope = frozenset({"shots"})
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(self, label_map: dict[str, str] | None = None) -> None:
         self._map = label_map if label_map is not None else _DEFAULT_LABEL_MAP
@@ -424,5 +424,7 @@ class LabelShortening(Transformation):
 
     def apply(self, prompt: str) -> str:
         for pattern, short in self._patterns:
-            prompt = pattern.sub(short, prompt)
+            # Use a callable replacement to prevent re from interpreting
+            # backslashes in `short` as template escapes (e.g. \L from code).
+            prompt = pattern.sub(lambda _, s=short: s, prompt)
         return prompt

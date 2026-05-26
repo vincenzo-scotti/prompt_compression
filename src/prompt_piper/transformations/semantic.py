@@ -59,7 +59,7 @@ class ContextCompression(Transformation):
     id = "O23"
     name = "ContextCompression"
     category = "semantic"
-    scope = frozenset({"data"})
+    scope = frozenset()
 
     def __init__(
         self,
@@ -343,7 +343,7 @@ class ChunkCompression(Transformation):
     id = "O28"
     name = "ChunkCompression"
     category = "semantic"
-    scope = frozenset({"instruction", "shots", "data"})
+    scope = frozenset({"instruction", "shots"})
 
     def __init__(
         self,
