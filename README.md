@@ -20,14 +20,38 @@ Copy `.env.example` to `.env` and fill in API keys before running real experimen
 
 ## Transformations
 
-28 rule-based operators (O1–O28) in four categories:
+28 rule-based operators (O1–O28) in four categories. **Precedence** is the fixed application order (lower = applied first). **Scope** indicates which prompt sections each operator is designed to act on (`instruction` = task description, `shots` = few-shot demonstrations, `data` = input context/question). Note: scope is currently metadata only — all operators are applied to the full `compress_field` text.
 
-| Category | IDs | Examples |
-|---|---|---|
-| Lexical | O1–O8 | whitespace normalisation, stopword removal, synonym shortening, abbreviation substitution |
-| Syntactic | O9–O13 | sentence merging, imperative rewrite, enumeration compression, clause deletion |
-| Structural | O14–O22 | deduplication, header removal, section/context/example pruning |
-| Semantic | O23–O28 | context compression, instruction summarisation, example distillation; some require an LLM backend |
+| ID | Name | Short Description | Scope | Precedence |
+|---|---|---|---|---|
+| O1 | RemoveExtraWhitespace | Collapse redundant whitespace and blank lines | instruction, shots, data | 1 |
+| O2 | TrimSpaces | Remove leading/trailing spaces from every line | instruction, shots, data | 2 |
+| O3 | RemoveStopwords | Delete non-essential function words | instruction | 3 |
+| O4 | ReplaceWithShortSynonym | Replace verbose phrases with shorter equivalents | instruction | 4 |
+| O5 | AbbreviationSubstitution | Replace common words with standard abbreviations | instruction, shots | 5 |
+| O6 | SymbolSubstitution | Replace words with symbols (e.g. "greater than" → ">") | instruction | 6 |
+| O7 | ContractionSubstitution | Replace expanded forms with contractions (e.g. "do not" → "don't") | instruction | 7 |
+| O8 | RemovePolitenessMarkers | Remove polite phrases that don't affect task semantics | instruction | 8 |
+| O9 | SentenceMerge | Merge adjacent short sentences into one | instruction | 9 |
+| O10 | ImperativeRewrite | Convert descriptive task framing to imperative form | instruction | 10 |
+| O11 | EnumerationCompression | Convert bulleted/numbered lists to semicolon-separated form | instruction | 11 |
+| O12 | ClauseDeletion | Remove non-essential introductory subordinate clauses | instruction | 12 |
+| O13 | SentenceSimplification | Replace complex syntax patterns with simpler forms | instruction | 13 |
+| O14 | DeduplicateInstructions | Remove repeated or near-duplicate instruction sentences | instruction, shots | 14 |
+| O15 | RemovePromptHeader | Remove section headers that add no task-relevant content | instruction, shots | 15 |
+| O16 | RemoveMetaText | Remove meta-sentences that describe the prompt structure | instruction | 16 |
+| O17 | ContextPruning | Remove paragraphs irrelevant to the task | instruction, data | 17 |
+| O18 | SectionPruning | Remove entire named sections from the prompt | instruction, shots | 18 |
+| O19 | ExampleRemoval | Remove the last few-shot example | shots | 19 |
+| O20 | ExampleSubsetSelection | Keep only the first *k* few-shot examples | shots | 20 |
+| O21 | ExampleSimplification | Compress verbose input/output examples to compact arrow notation | shots | 21 |
+| O22 | LabelShortening | Replace verbose output labels with compact abbreviations | shots | 22 |
+| O23 | ContextCompression | Compress context paragraphs (heuristic: first sentence; LLM: summary) | data | 23 |
+| O24 | InstructionSummarization | Compress verbose task description to a short instruction | instruction | 24 |
+| O25 | InstructionAbstraction | Replace detailed rule lists with a single abstract instruction | instruction | 25 |
+| O26 | SchemaEncoding | Replace natural-language output-format descriptions with compact schema | instruction | 26 |
+| O27 | ExampleDistillation | Replace few-shot examples with a generalised rule (LLM-backed) | shots | 27 |
+| O28 | ChunkCompression | Compress each paragraph independently (LLM or sub-pipeline) | instruction, shots, data | 28 |
 
 ## Prompt fields and few-shot compression
 
