@@ -48,6 +48,10 @@ class BaselineEval:
     # Test-phase
     test_avg_tokens: float | None = None
     test_avg_performance: float | None = None
+    # Wall-clock seconds for this baseline (search + test phases combined)
+    elapsed_seconds: float | None = None
+    # Hyperparameters used to configure this baseline
+    config: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +102,9 @@ class CompressorResult:
     #: Report produced by :class:`~prompt_piper.transformations.fitting.DatasetVocabularyFitter`
     #: when ``use_fitting=True``.  ``None`` when fitting was not performed.
     fitting_report: dict | None = None
+    #: Wall-clock seconds for the fitting phase.  ``None`` when fitting was
+    #: skipped (``use_fitting=False``).
+    fitting_elapsed_seconds: float | None = None
 
     # ------------------------------------------------------------------
     # Serialisation
@@ -135,10 +142,15 @@ class CompressorResult:
         return datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
 
     def summary(self) -> str:
+        fit_str = (
+            f"  |  Fitting: {self.fitting_elapsed_seconds:.1f}s"
+            if self.fitting_elapsed_seconds is not None
+            else ""
+        )
         lines = [
             f"Run: {self.run_name}  [{self.timestamp}]",
             f"Search: {self.search_elapsed_seconds:.1f}s  |  "
-            f"Eval: {self.eval_elapsed_seconds:.1f}s",
+            f"Eval: {self.eval_elapsed_seconds:.1f}s{fit_str}",
             f"Pareto front ({len(self.pareto_solutions)} solutions):",
         ]
         for sol in self.pareto_solutions:
@@ -160,8 +172,13 @@ class CompressorResult:
                     if b.test_avg_tokens is not None
                     else ""
                 )
+                elapsed_str = (
+                    f"  [{b.elapsed_seconds:.1f}s]"
+                    if b.elapsed_seconds is not None
+                    else ""
+                )
                 lines.append(
                     f"  {b.name}: search=({b.search_avg_tokens:.1f} tok, "
-                    f"{b.search_avg_performance:.3f} perf){test_str}"
+                    f"{b.search_avg_performance:.3f} perf){test_str}{elapsed_str}"
                 )
         return "\n".join(lines)

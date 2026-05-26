@@ -81,6 +81,36 @@ def _load_model(model_type: str, model_name: str, **kwargs):
     if model_type == "openai-chat-completions":
         from lm_eval.models.openai_completions import OpenAIChatCompletion
         return OpenAIChatCompletion(model=model_name, **kwargs)
+    if model_type == "openai-chat":
+        # Like openai-chat-completions but without the lm-eval heuristic that
+        # inspects model names for "o1"/"5"/"o3"/"o4" and unconditionally drops
+        # stop sequences + forces temperature=1.  Use this type for any OpenAI
+        # chat model whose name happens to match those substrings (e.g. gpt-5.*).
+        from lm_eval.models.openai_completions import LocalChatCompletion, OpenAIChatCompletion
+
+        class _OpenAIChatModel(OpenAIChatCompletion):
+            def __init__(self, drop_stop_sequences: bool = False, **kw):
+                self._drop_stop = drop_stop_sequences
+                super().__init__(**kw)
+
+            def _create_payload(
+                self, messages, generate=False, gen_kwargs=None,
+                seed=1234, eos="<|endoftext|>", **kw
+            ):
+                # Use LocalChatCompletion's payload logic (preserves stop sequences
+                # and task-specified temperature), then upgrade max_tokens →
+                # max_completion_tokens for the newer OpenAI API.
+                payload = LocalChatCompletion._create_payload(
+                    self, messages, generate=generate, gen_kwargs=gen_kwargs,
+                    seed=seed, eos=eos, **kw
+                )
+                if "max_tokens" in payload:
+                    payload["max_completion_tokens"] = payload.pop("max_tokens")
+                if self._drop_stop:
+                    payload.pop("stop", None)
+                return payload
+
+        return _OpenAIChatModel(model=model_name, **kwargs)
     if model_type == "vllm":
         from lm_eval.models.vllm_causallms import VLLM
         return VLLM(pretrained=model_name, **kwargs)
@@ -121,7 +151,7 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         return _GeminiChatCompletion(model=model_name, **kwargs)
     raise ValueError(
         f"Unknown model type {model_type!r}. "
-        "Supported: 'hf'/'huggingface', 'openai', 'openai-chat-completions', 'vllm', 'gemini'."
+        "Supported: 'hf'/'huggingface', 'openai', 'openai-chat-completions', 'openai-chat', 'vllm', 'gemini'."
     )
 
 
@@ -1093,8 +1123,16 @@ class LMEvalSemanticBackend:
         self._template = prompt_template  # None → auto-select in __call__
         self._system_prompt = system_prompt or _SEMANTIC_SYSTEM_PROMPT
         self._use_chat = apply_chat_template
+        # Cache: identical (text, instruction) pairs — common when the shared
+        # task description is the same across many dataset samples — are
+        # compressed only once and the result reused for all subsequent calls.
+        self._cache: dict[tuple[str, str], str] = {}
 
     def __call__(self, text: str, instruction: str) -> str:
+        key = (text, instruction)
+        if key in self._cache:
+            return self._cache[key]
+
         gen_kwargs = {
             "until": self._stop_sequences,
             "max_gen_toks": self._max_gen_toks,
@@ -1110,7 +1148,9 @@ class LMEvalSemanticBackend:
 
         instance = _make_instance("generate_until", {}, (actual_prompt, gen_kwargs), 0)
         result = _call_model(self._model, "generate_until", [instance])
-        return result[0].strip()
+        compressed = result[0].strip()
+        self._cache[key] = compressed
+        return compressed
 
     def _format_chat(self, instruction: str, text: str) -> str:
         """Build a chat-formatted prompt using the model's own chat template.

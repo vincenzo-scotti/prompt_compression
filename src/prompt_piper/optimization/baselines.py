@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import random
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -42,6 +42,8 @@ class BaselineResult:
     objectives: np.ndarray  # shape (n_solutions, 2)
     #: Human-readable transformation names for each solution.
     transformation_names: list[list[str]]
+    #: Hyperparameters used to construct this baseline.
+    config: dict = field(default_factory=dict)
 
     @property
     def avg_tokens(self) -> np.ndarray:
@@ -83,6 +85,10 @@ class NoCompressionBaseline:
 
     name = "no_compression"
 
+    @property
+    def config(self) -> dict:
+        return {}
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         bits = np.zeros(problem.n_var, dtype=int)
         avg_tokens, avg_perf = problem.score_solution(bits)
@@ -93,6 +99,7 @@ class NoCompressionBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=[[]],
+            config=self.config,
         )
 
 
@@ -105,6 +112,10 @@ class AllTransformationsBaseline:
 
     name = "all_transformations"
 
+    @property
+    def config(self) -> dict:
+        return {}
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         bits = np.ones(problem.n_var, dtype=int)
         avg_tokens, avg_perf = problem.score_solution(bits)
@@ -116,6 +127,7 @@ class AllTransformationsBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=names,
+            config=self.config,
         )
 
 
@@ -142,6 +154,10 @@ class RandomSearchBaseline:
     def __init__(self, n_evaluations: int = 2500, seed: int = 42) -> None:
         self._n_eval = n_evaluations
         self._seed = seed
+
+    @property
+    def config(self) -> dict:
+        return {"n_evaluations": self._n_eval, "seed": self._seed}
 
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         rng = random.Random(self._seed)
@@ -171,6 +187,7 @@ class RandomSearchBaseline:
             solutions=pareto_solutions,
             objectives=pareto_objectives,
             transformation_names=names,
+            config=self.config,
         )
 
 
@@ -194,6 +211,10 @@ class TruncatedPromptBaseline:
     def __init__(self, target_ratio: float = 0.5) -> None:
         self._ratio = target_ratio
 
+    @property
+    def config(self) -> dict:
+        return {"target_ratio": self._ratio}
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         ratio = self._ratio
 
@@ -208,6 +229,7 @@ class TruncatedPromptBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=[["TruncatedPrompt"]],
+            config=self.config,
         )
 
 
@@ -235,6 +257,10 @@ class RandomDeletionBaseline:
         self._prob = deletion_prob
         self._seed = seed
 
+    @property
+    def config(self) -> dict:
+        return {"deletion_prob": self._prob, "seed": self._seed}
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         prob = self._prob
         # A single RNG instance is shared across all samples in the dataset so
@@ -254,6 +280,7 @@ class RandomDeletionBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=[["RandomDeletion"]],
+            config=self.config,
         )
 
 
@@ -303,6 +330,15 @@ class MultiArmedBanditBaseline:
         self._alpha_init = alpha_init
         self._beta_init = beta_init
 
+    @property
+    def config(self) -> dict:
+        return {
+            "n_evaluations": self._n_eval,
+            "seed": self._seed,
+            "alpha_init": self._alpha_init,
+            "beta_init": self._beta_init,
+        }
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         rng = np.random.default_rng(self._seed)
         n_var = problem.n_var
@@ -341,6 +377,7 @@ class MultiArmedBanditBaseline:
             solutions=pareto_solutions,
             objectives=pareto_objectives,
             transformation_names=names,
+            config=self.config,
         )
 
 
@@ -359,6 +396,10 @@ class SummarizationBaseline:
 
     name = "summarization"
 
+    @property
+    def config(self) -> dict:
+        return {}
+
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         bits = np.array(
             [1 if t.category == "semantic" else 0 for t in problem._transforms],
@@ -373,4 +414,5 @@ class SummarizationBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=names,
+            config=self.config,
         )

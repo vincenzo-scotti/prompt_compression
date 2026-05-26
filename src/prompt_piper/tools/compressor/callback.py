@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 from pymoo.core.callback import Callback
 
 
@@ -25,6 +27,7 @@ class GenerationCallback(Callback):
 
             {
                 "generation": int,
+                "elapsed_seconds": float,
                 "n_solutions": int,
                 "pareto_front": [
                     {
@@ -42,8 +45,10 @@ class GenerationCallback(Callback):
         super().__init__()
         self._names = transform_names
         self.history: list[dict] = []
+        self._t0: float = time.perf_counter()
 
     def notify(self, algorithm) -> None:
+        elapsed = time.perf_counter() - self._t0
         opt = algorithm.opt
         if opt is None or len(opt) == 0:
             return
@@ -68,6 +73,7 @@ class GenerationCallback(Callback):
         self.history.append(
             {
                 "generation": int(algorithm.n_gen),
+                "elapsed_seconds": round(elapsed, 3),
                 "n_solutions": len(solutions),
                 "pareto_front": solutions,
             }

@@ -101,12 +101,15 @@ class CompressorRunner:
         semantic_backend = backend.get("semantic_backend")
 
         if run_cfg.use_fitting:
+            t_fit_start = time.perf_counter()
             fitted, fitting_report = self._run_fitting(
                 run_cfg, search_dataset, semantic_backend
             )
+            fitting_elapsed: float | None = time.perf_counter() - t_fit_start
             factory = self._compose_factory(fitted, semantic_backend)
         else:
             fitting_report = None
+            fitting_elapsed = None
             factory = backend.get("transformation_factory")
 
         exp_config = self._make_exp_config(run_cfg, n_subset=run_cfg.n_search)
@@ -134,7 +137,7 @@ class CompressorRunner:
             return self._run_baselines_only(
                 run_cfg, exp, test_dataset,
                 transform_ids, transform_names,
-                timestamp, fitting_report,
+                timestamp, fitting_report, fitting_elapsed,
             )
 
         # ---- Search phase ------------------------------------------------
@@ -156,8 +159,9 @@ class CompressorRunner:
         # bit vectors which would evaluate as no-compression; run them on the
         # test problem directly instead.
         _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion"}
-        baseline_test: dict[str, tuple[float, float]] = {}
+        baseline_test: dict[str, tuple[float, float, float]] = {}
         for name, br in exp_result.baselines.items():
+            t_bl_test = time.perf_counter()
             if name in _CUSTOM_BASELINES:
                 test_br = exp.run_baseline(name, problem=exp._build_problem(test_dataset))
                 avg_tok = float(test_br.avg_tokens.mean())
@@ -166,7 +170,7 @@ class CompressorRunner:
                 bl_test_obj = exp.evaluate_solutions(br.solutions, test_dataset)
                 avg_tok = float(bl_test_obj[:, 0].mean())
                 avg_perf = float(bl_test_obj[:, 1].mean())
-            baseline_test[name] = (avg_tok, avg_perf)
+            baseline_test[name] = (avg_tok, avg_perf, time.perf_counter() - t_bl_test)
 
         eval_elapsed = time.perf_counter() - t_eval_start
 
@@ -192,7 +196,13 @@ class CompressorRunner:
 
         baseline_evals = []
         for name, br in exp_result.baselines.items():
-            b_test_tok, b_test_perf = baseline_test.get(name, (None, None))
+            b_test_tok, b_test_perf, b_test_elapsed = baseline_test.get(name, (None, None, None))
+            bl_search_elapsed = exp_result.baseline_elapsed.get(name)
+            total_elapsed = (
+                (bl_search_elapsed or 0.0) + (b_test_elapsed or 0.0)
+                if bl_search_elapsed is not None or b_test_elapsed is not None
+                else None
+            )
             baseline_evals.append(
                 BaselineEval(
                     name=name,
@@ -201,6 +211,8 @@ class CompressorRunner:
                     search_avg_performance=float(br.avg_performance.mean()),
                     test_avg_tokens=b_test_tok,
                     test_avg_performance=b_test_perf,
+                    elapsed_seconds=total_elapsed,
+                    config=br.config,
                 )
             )
 
@@ -217,6 +229,7 @@ class CompressorRunner:
             generation_history=exp_result.generation_history,
             extra={"dry_run": self._dry_run},
             fitting_report=fitting_report,
+            fitting_elapsed_seconds=fitting_elapsed,
         )
 
     def _run_baselines_only(
@@ -228,6 +241,7 @@ class CompressorRunner:
         transform_names: list[str],
         timestamp: str,
         fitting_report,
+        fitting_elapsed: float | None = None,
     ) -> CompressorResult:
         """Run baselines on both search and test splits; no NSGA-II optimisation."""
         search_problem = exp._build_problem(exp._sample_subset())
@@ -236,8 +250,10 @@ class CompressorRunner:
         t_eval_start = time.perf_counter()
         baseline_evals = []
         for name in (run_cfg.baselines or []):
+            t_bl = time.perf_counter()
             search_br = exp.run_baseline(name, problem=search_problem)
             test_br = exp.run_baseline(name, problem=test_problem)
+            bl_elapsed = time.perf_counter() - t_bl
             baseline_evals.append(
                 BaselineEval(
                     name=name,
@@ -246,6 +262,8 @@ class CompressorRunner:
                     search_avg_performance=float(search_br.avg_performance.mean()),
                     test_avg_tokens=float(test_br.avg_tokens.mean()),
                     test_avg_performance=float(test_br.avg_performance.mean()),
+                    elapsed_seconds=bl_elapsed,
+                    config=search_br.config,
                 )
             )
         eval_elapsed = time.perf_counter() - t_eval_start
@@ -263,6 +281,7 @@ class CompressorRunner:
             generation_history=[],
             extra={"dry_run": self._dry_run, "baselines_only": True},
             fitting_report=fitting_report,
+            fitting_elapsed_seconds=fitting_elapsed,
         )
 
     # ------------------------------------------------------------------
