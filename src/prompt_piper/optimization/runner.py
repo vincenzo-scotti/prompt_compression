@@ -78,6 +78,7 @@ class ExperimentResult:
     pymoo_result: Any
     elapsed_time: float
     baselines: dict[str, BaselineResult] = field(default_factory=dict)
+    baseline_elapsed: dict[str, float] = field(default_factory=dict)
     generation_history: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------
@@ -242,9 +243,12 @@ class Experiment:
         history = getattr(callback, "history", [])
 
         baseline_results: dict[str, BaselineResult] = {}
+        baseline_elapsed: dict[str, float] = {}
         if baselines:
             for name in baselines:
+                t_bl = time.perf_counter()
                 baseline_results[name] = self.run_baseline(name, problem)
+                baseline_elapsed[name] = time.perf_counter() - t_bl
 
         return ExperimentResult(
             config=self.config,
@@ -254,6 +258,7 @@ class Experiment:
             pymoo_result=res,
             elapsed_time=elapsed,
             baselines=baseline_results,
+            baseline_elapsed=baseline_elapsed,
             generation_history=history,
         )
 
