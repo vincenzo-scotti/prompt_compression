@@ -1,0 +1,85 @@
+# ICSE'26 — MBPP-Instruct — gpt-5.4-mini-2026-03-17 (OpenAI Chat API)
+#
+# model_type: openai-chat  (NOT openai-chat-completions)
+# The openai-chat type calls LocalChatCompletion._create_payload directly,
+# bypassing the lm-eval o-series heuristic that checks "5" in model_name.
+# Without this, gpt-5.4-mini-2026-03-17 would have stop sequences stripped
+# and temperature forced to 1.
+#
+# Task: mbpp_instruct — 500 Python programming problems, 0-shot.
+# Metric: pass@1 (execution-based, [0,1]). Output type: generate_until.
+# Requires HF_ALLOW_CODE_EVAL=1 to enable code execution.
+#
+# Rough API-call budget:
+#   Fitting (O4/O10/O15/O28 on 20 search samples, ~4 calls/sample): ~80 calls
+#   NSGA-II search (20 gens × 20 pop × 20 samples × 1 eval): ~8,000 calls
+#   Baselines (7 × 20 samples): ~140 calls
+#   Test evaluation (Pareto front ≤ 20 solutions × 50 samples): ~1,000 calls
+#   Total (rough): ~9,000–10,000 API calls
+#
+# At ~1–3 s/call with num_concurrent=10: expect 1–3 h wall-clock.
+#
+# Requires: OPENAI_API_KEY and HF_ALLOW_CODE_EVAL=1.
+
+model:
+  type: openai-chat
+  name: gpt-5.4-mini-2026-03-17
+  kwargs:
+    # gpt-5.4-mini does not support the 'stop' parameter; drop it from all
+    # API calls (stop-based termination relies on max_gen_toks as fallback).
+    drop_stop_sequences: true
+    # num_concurrent=1 uses the synchronous requests path, avoiding aiohttp
+    # DNS failures that occur intermittently under concurrent load.
+    num_concurrent: 1
+
+output:
+  dir: ./results/icse_26/gpt-5.4-mini-2026-03-17
+  overwrite: false        # set true to force re-run; false enables restart
+
+defaults:
+  compress_field: prompt_0shot
+
+  apply_chat_template: false
+  fewshot_as_multiturn: false
+
+  use_fitting: true
+  use_llm_for_semantic: true
+
+  n_search: 20
+  n_test: 50
+  algorithm: nsga2
+  pop_size: 20
+  n_gen: 20
+
+  seed: 42
+  subset_seed: 42
+
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - multi_armed_bandit
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  extra_stop_sequences: null
+
+  metric_key: null
+  search_split: test
+  test_split: test
+
+
+runs:
+
+  # ----------------------------------------------------------- MBPP-Instruct
+  # Python programming benchmark — 500 problems, pass@1, generate_until.
+  # 0-shot: instruction + test cases only, no few-shot demonstrations.
+  # max_gen_toks: 256 — enough for a complete function body.
+  - name: mbpp_instruct_nsga2
+    task: mbpp_instruct
+    num_fewshot: 0
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256

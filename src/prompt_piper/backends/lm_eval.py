@@ -108,6 +108,15 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                     payload["max_completion_tokens"] = payload.pop("max_tokens")
                 if self._drop_stop:
                     payload.pop("stop", None)
+                # Strip HuggingFace-only generation parameters not accepted by
+                # the OpenAI API (e.g. num_beams from task default gen_kwargs).
+                _HF_ONLY = {
+                    "num_beams", "do_sample", "num_return_sequences",
+                    "repetition_penalty", "length_penalty", "no_repeat_ngram_size",
+                    "early_stopping", "min_length", "min_new_tokens",
+                }
+                for key in _HF_ONLY:
+                    payload.pop(key, None)
                 return payload
 
         return _OpenAIChatModel(model=model_name, **kwargs)

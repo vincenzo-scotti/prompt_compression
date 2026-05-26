@@ -1,0 +1,139 @@
+# ICSE'26 — Full Benchmark Suite — gpt-5.4-mini-2026-03-17 (OpenAI Chat API)
+#
+# model_type: openai-chat  (NOT openai-chat-completions)
+# The openai-chat type calls LocalChatCompletion._create_payload directly,
+# bypassing the lm-eval o-series heuristic that checks "5" in model_name.
+# Without this, gpt-5.4-mini-2026-03-17 would have stop sequences stripped
+# and temperature forced to 1.
+#
+# Tasks (5 benchmarks):
+#   mbpp_instruct                              — code, pass@1, 3-shot, compress instruction only
+#   mmlu_pro_computer_science                  — CS knowledge, acc (CoT), 5-shot, compress instruction only
+#   gsm8k_cot                                  — math reasoning, exact match (CoT), 8-shot, compress instruction only
+#   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match (CoT), 3-shot, compress instruction only
+#   leaderboard_musr_murder_mysteries          — multi-step reasoning, acc_norm, 0-shot, compress full prompt
+#
+# Rough API-call budget per task:
+#   Fitting (~80 calls) + NSGA-II (~8,000 calls) + Baselines (~140 calls) + Test (~1,000 calls)
+#   Total per task: ~9,000–10,000 calls; 5 tasks: ~45,000–50,000 calls
+#
+# At ~1–3 s/call with num_concurrent=1: expect 15–40 h wall-clock total.
+#
+# Requires: OPENAI_API_KEY
+# mbpp_instruct also requires: HF_ALLOW_CODE_EVAL=1
+
+model:
+  type: openai-chat
+  name: gpt-5.4-mini-2026-03-17
+  kwargs:
+    # gpt-5.4-mini does not support the 'stop' parameter; drop it from all
+    # API calls (stop-based termination relies on max_gen_toks as fallback).
+    drop_stop_sequences: true
+    # num_concurrent=1 uses the synchronous requests path, avoiding aiohttp
+    # DNS failures that occur intermittently under concurrent load.
+    num_concurrent: 1
+
+output:
+  dir: ./results/icse_26/gpt-5.4-mini-2026-03-17
+  overwrite: false        # set true to force re-run; false enables restart
+
+defaults:
+  compress_field: prompt_0shot
+
+  apply_chat_template: false
+  fewshot_as_multiturn: false
+
+  use_fitting: true
+  use_llm_for_semantic: true
+
+  n_search: 20
+  n_test: 50
+  algorithm: nsga2
+  pop_size: 20
+  n_gen: 20
+
+  seed: 42
+  subset_seed: 42
+
+  baselines:
+    - no_compression
+    - all_transformations
+    - random_search
+    - multi_armed_bandit
+    - summarization
+    - truncated_prompt
+    - random_deletion
+
+  extra_stop_sequences: null
+
+  metric_key: null
+  search_split: test
+  test_split: test
+
+
+runs:
+
+  # ----------------------------------------------------------- MBPP-Instruct
+  # Python programming benchmark — 500 problems, pass@1, generate_until.
+  # 3-shot: instruction + 3 examples + test case.
+  # compress_field=prompt_0shot: compress only the NL instruction; leave shots intact.
+  # max_gen_toks: 256 — enough for a complete function body.
+  # Requires: HF_ALLOW_CODE_EVAL=1
+  - name: mbpp_instruct_nsga2
+    task: mbpp_instruct
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+
+  # ----------------------------------------------------------- MMLU-Pro (CS)
+  # Computer Science subset of MMLU-Pro — ~1,800 problems, accuracy (CoT), 5-shot.
+  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
+  # max_gen_toks: 1024 — enough for a CoT chain + final answer letter.
+  - name: mmlu_pro_cs_nsga2
+    task: mmlu_pro_computer_science
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  # ----------------------------------------------------------- GSM8K-CoT
+  # Grade-school math reasoning — 1,319 test problems, exact match, 8-shot CoT.
+  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
+  # max_gen_toks: 1024 — enough for a full arithmetic chain-of-thought.
+  - name: gsm8k_cot_nsga2
+    task: gsm8k_cot
+    num_fewshot: 8
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  # ----------------------------------------------------------- BBH – Logical Deduction
+  # BIG-Bench Hard: order 7 objects from clues — 250 problems, exact match, 3-shot CoT.
+  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
+  # max_gen_toks: 1024 — enough for a reasoning chain + final ordered list.
+  - name: bbh_logical_deduction_nsga2
+    task: bbh_cot_fewshot_logical_deduction_seven_objects
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+
+  # ----------------------------------------------------------- MuSR – Murder Mysteries
+  # Multi-step soft reasoning — 0-shot, acc_norm (loglikelihood over answer choices).
+  # compress_field=null: no instruction/shots split; compress the full prompt.
+  # No max_gen_toks needed: loglikelihood task, no generation.
+  - name: musr_murder_mysteries_nsga2
+    task: leaderboard_musr_murder_mysteries
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
