@@ -473,14 +473,27 @@ class LMEvalTokenizer(Tokenizer):
         # ---- 4. OpenAI chat models: resolve via model name attribute ----
         # OpenAIChatCompletion stores the model name in ``model.model``
         # (e.g. "gpt-4o").  Try tiktoken before falling back to whitespace.
+        # For unknown model names (e.g. gpt-5.x-mini-*), fall back to
+        # o200k_base (GPT-4o / GPT-5 family) then cl100k_base (GPT-4).
         model_name_attr = getattr(model, "model", None)
         if isinstance(model_name_attr, str) and model_name_attr:
             try:
                 import tiktoken  # noqa: PLC0415
+                enc = None
                 try:
                     enc = tiktoken.encoding_for_model(model_name_attr)
                 except KeyError:
-                    enc = None
+                    for _fallback in ("o200k_base", "cl100k_base"):
+                        try:
+                            enc = tiktoken.get_encoding(_fallback)
+                            logger.info(
+                                "LMEvalTokenizer: model %r not in tiktoken registry; "
+                                "using fallback encoding %r.",
+                                model_name_attr, _fallback,
+                            )
+                            break
+                        except Exception:
+                            pass
                 if enc is not None:
                     def _openai_name_tiktoken(text: str, _enc=enc) -> int:
                         return len(_enc.encode(text))

@@ -2,5 +2,6 @@ pandas==3.0.2
 matplotlib==3.10.9
 transformers==5.6.2
 lm_eval[hf]==0.4.11
+lm-eval[api]
 pymoo==0.6.1.6
 nltk==3.9.1

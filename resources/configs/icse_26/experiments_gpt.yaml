@@ -6,10 +6,15 @@
 # Without this, gpt-5.4-mini-2026-03-17 would have stop sequences stripped
 # and temperature forced to 1.
 #
-# Tasks (5 benchmarks):
-#   mbpp_instruct                              — code, pass@1, 3-shot, compress instruction only
+# Semantic operators (O23–O28) are enabled with a length guardrail: if a
+# semantic operator produces longer output than its input it reverts to the
+# original, so operators can only compress or be neutral, never expand.
+# mbpp_instruct is excluded: pass@1 code evaluation does not work via the
+# OpenAI chat-completions API (use HF models for MBPP).
+#
+# Tasks (4 benchmarks):
 #   mmlu_pro_computer_science                  — CS knowledge, acc (CoT), 5-shot, compress instruction only
-#   gsm8k_cot                                  — math reasoning, flexible-extract (CoT), 8-shot, compress instruction only
+#   gsm8k_cot                                  — math reasoning, 8-shot CoT, compress instruction only
 #   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match (CoT), 3-shot, compress instruction only
 #   leaderboard_musr_murder_mysteries          — multi-step reasoning, acc_norm, 0-shot, compress full prompt
 #
@@ -18,15 +23,9 @@
 # MAB uses the same evaluation budget as NSGA-II (pop_size × n_gen evaluations).
 #
 # Transferability analysis: after all runs, Pareto solutions from gsm8k_cot_nsga2
-# are re-evaluated on bbh_logical_deduction and vice versa to measure cross-task
-# generalisation of discovered compression strategies.
-#
-# Rough API-call budget per task pair (NSGA-II + MAB):
-#   Fitting (~80) + NSGA-II (~8,000) + MAB (~8,000) + Baselines (~140) + Test (~1,000)
-#   Total per pair: ~17,000–18,000; 5 pairs: ~85,000–90,000 calls
+# are re-evaluated on bbh_logical_deduction and vice versa.
 #
 # Requires: OPENAI_API_KEY
-# mbpp_instruct also requires: HF_ALLOW_CODE_EVAL=1
 
 model:
   type: openai-chat
@@ -55,8 +54,8 @@ defaults:
   n_search: 20
   n_test: 50
   algorithm: nsga2
-  pop_size: 20
-  n_gen: 20
+  pop_size: 50
+  n_gen: 10
 
   seed: 42
   subset_seed: 42
@@ -89,40 +88,6 @@ transferability:
 
 
 runs:
-
-  # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
-  # Python programming benchmark — 500 problems, pass@1, generate_until.
-  # 3-shot: instruction + 3 examples + test case.
-  # compress_field=prompt_0shot: compress only the NL instruction; leave shots intact.
-  # max_gen_toks: 256 — enough for a complete function body.
-  # Requires: HF_ALLOW_CODE_EVAL=1
-
-  - name: mbpp_instruct_nsga2
-    task: mbpp_instruct
-    algorithm: nsga2
-    num_fewshot: 3
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 256
-
-  - name: mbpp_instruct_mab
-    task: mbpp_instruct
-    algorithm: mab
-    num_fewshot: 3
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 256
-    baselines:
-      - no_compression
-      - all_transformations
-      - random_search
-      - summarization
-      - truncated_prompt
-      - random_deletion
 
   # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
   # Computer Science subset of MMLU-Pro — ~1,800 problems, acc (CoT), 5-shot.
@@ -158,8 +123,7 @@ runs:
 
   # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
   # Grade-school math reasoning — 1,319 test problems, 8-shot CoT.
-  # metric_key: flexible-extract — handles paraphrased numeric answers better
-  # than strict exact_match (e.g. "The answer is 42" vs "42").
+  # metric_key: null — use lm-eval's default first metric (exact_match in 0.4.x).
   # compress_field=prompt_0shot: compress only the question; leave CoT shots intact.
   # max_gen_toks: 1024 — enough for a full arithmetic chain-of-thought.
 
@@ -167,7 +131,7 @@ runs:
     task: gsm8k_cot
     algorithm: nsga2
     num_fewshot: 8
-    metric_key: flexible-extract
+    metric_key: null
     compress_field: prompt_0shot
     search_split: test
     test_split: test
@@ -178,7 +142,7 @@ runs:
     task: gsm8k_cot
     algorithm: mab
     num_fewshot: 8
-    metric_key: flexible-extract
+    metric_key: null
     compress_field: prompt_0shot
     search_split: test
     test_split: test
