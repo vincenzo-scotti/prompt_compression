@@ -36,10 +36,7 @@ class Transformation(abc.ABC):
 
     def __call__(self, prompt: str) -> str:
         result = self.apply(prompt)
-        # Semantic operators can hallucinate or paraphrase to longer text.
-        # Revert to the original when the output is not shorter so they can
-        # only help (compress) or be neutral, never hurt token count.
-        if self.category == "semantic" and len(result) >= len(prompt):
+        if not result.strip() or len(result) > len(prompt):
             return prompt
         return result
 
