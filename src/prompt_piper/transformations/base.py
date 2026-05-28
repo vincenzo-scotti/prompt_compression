@@ -35,7 +35,13 @@ class Transformation(abc.ABC):
         """Return the transformed prompt."""
 
     def __call__(self, prompt: str) -> str:
-        return self.apply(prompt)
+        result = self.apply(prompt)
+        # Semantic operators can hallucinate or paraphrase to longer text.
+        # Revert to the original when the output is not shorter so they can
+        # only help (compress) or be neutral, never hurt token count.
+        if self.category == "semantic" and len(result) >= len(prompt):
+            return prompt
+        return result
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(id={self.id!r})"

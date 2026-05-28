@@ -36,8 +36,8 @@ defaults:
   n_search: 20
   n_test: 50
   algorithm: nsga2
-  pop_size: 20
-  n_gen: 20
+  pop_size: 50
+  n_gen: 10
 
   seed: 42
   subset_seed: 42
@@ -130,7 +130,7 @@ runs:
     task: gsm8k_cot
     algorithm: nsga2
     num_fewshot: 8
-    metric_key: flexible-extract
+    metric_key: null
     compress_field: prompt_0shot
     search_split: test
     test_split: test
@@ -141,7 +141,7 @@ runs:
     task: gsm8k_cot
     algorithm: mab
     num_fewshot: 8
-    metric_key: flexible-extract
+    metric_key: null
     compress_field: prompt_0shot
     search_split: test
     test_split: test
