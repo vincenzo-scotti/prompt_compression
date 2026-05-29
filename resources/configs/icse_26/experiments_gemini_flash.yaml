@@ -52,6 +52,7 @@ defaults:
     - summarization
     - truncated_prompt
     - random_deletion
+    - llmlingua2
 
   extra_stop_sequences: null
   metric_key: null

@@ -31,7 +31,6 @@ tasks:
 
   # ══════════════════════════════════════════════════════════════════ MBPP ════
   # mbpp_instruct: pass@1 Python code generation, 3-shot.
-  #https://huggingface.co/microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
   # lm-eval appends gen_prefix="\n```python\n" to the prompt, so the model
   # begins generating inside an already-opened code block. The extraction
   # filter reads code between triple backtick fences. Do NOT tell the model
@@ -76,7 +75,7 @@ tasks:
     generation_kwargs:
       max_gen_toks: 1024
     instruction_prefix: |
-      You are an expert computer science assistant. You will https://huggingface.co/microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbankbe given a
+      You are an expert computer science assistant. You will be given a
       multiple-choice question drawn from topics including algorithms, data
       structures, operating systems, computer networks, databases, software
       engineering, and computer architecture.

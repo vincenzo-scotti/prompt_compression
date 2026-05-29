@@ -21,6 +21,7 @@ defaults:
     - all_transformations
     - random_search
     - multi_armed_bandit
+    - llmlingua2
   use_llm_for_semantic: true
   algorithm: nsga2
   pop_size: 50

@@ -1,6 +1,6 @@
 """Baseline strategies for comparison with the evolutionary search.
 
-Seven baselines are provided:
+Eight baselines are provided:
 
 * :class:`NoCompressionBaseline` — apply no transformations (identity).
 * :class:`AllTransformationsBaseline` — apply all transformations in sequence.
@@ -17,6 +17,8 @@ Seven baselines are provided:
 * :class:`MultiArmedBanditBaseline` — Thompson Sampling bandit over the
   binary operator space; uses task performance as the reward signal and
   returns the Pareto-non-dominated subset of all visited solutions.
+* :class:`LLMLingua2Baseline` — token-level compression via the LLMLingua-2
+  model (requires the ``llmlingua`` package).
 """
 
 from __future__ import annotations
@@ -414,5 +416,93 @@ class SummarizationBaseline:
             solutions=solutions,
             objectives=objectives,
             transformation_names=names,
+            config=self.config,
+        )
+
+
+# ---------------------------------------------------------------------------
+# LLMLingua-2 baseline
+# ---------------------------------------------------------------------------
+
+class LLMLingua2Baseline:
+    """Token-level prompt compression using LLMLingua-2.
+
+    Wraps :class:`llmlingua.PromptCompressor` with ``use_llmlingua2=True`` to
+    compress each prompt to approximately *target_rate* of its original token
+    count using a fine-tuned token-classification model.
+
+    Requires the ``llmlingua`` package: ``pip install llmlingua``.
+
+    Parameters
+    ----------
+    model_name:
+        HuggingFace model ID for the LLMLingua-2 compressor.
+        Defaults to the multilingual BERT model from the paper.
+    target_rate:
+        Fraction of tokens to keep (e.g. ``0.5`` = 50 %).
+    force_tokens:
+        Token strings that are always preserved.  Defaults to
+        ``['\\n', '.', '!', '?', ',']``.
+    """
+
+    name = "llmlingua2"
+
+    def __init__(
+        self,
+        model_name: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank",
+        target_rate: float = 0.5,
+        force_tokens: list[str] | None = None,
+    ) -> None:
+        self._model_name = model_name
+        self._rate = target_rate
+        self._force_tokens = force_tokens if force_tokens is not None else ["\n", ".", "!", "?", ","]
+        self._compressor = None
+
+    @property
+    def config(self) -> dict:
+        return {
+            "model_name": self._model_name,
+            "target_rate": self._rate,
+            "force_tokens": self._force_tokens,
+        }
+
+    def _get_compressor(self):
+        if self._compressor is None:
+            try:
+                from llmlingua import PromptCompressor
+            except ImportError as exc:
+                raise ImportError(
+                    "llmlingua is required for LLMLingua2Baseline. "
+                    "Install it with: pip install llmlingua"
+                ) from exc
+            self._compressor = PromptCompressor(
+                model_name=self._model_name,
+                use_llmlingua2=True,
+            )
+        return self._compressor
+
+    def run(self, problem: PromptCompressionProblem) -> BaselineResult:
+        compressor = self._get_compressor()
+        rate = self._rate
+        force_tokens = self._force_tokens
+
+        def _compress(text: str) -> str:
+            result = compressor.compress_prompt_llmlingua2(
+                text,
+                rate=rate,
+                force_tokens=force_tokens,
+                chunk_end_tokens=[".", "\n"],
+                drop_consecutive=True,
+            )
+            return result["compressed_prompt"]
+
+        avg_tokens, avg_perf = problem.score_transform_fn(_compress)
+        solutions = np.zeros((1, problem.n_var), dtype=int)
+        objectives = np.array([[avg_tokens, avg_perf]])
+        return BaselineResult(
+            name=self.name,
+            solutions=solutions,
+            objectives=objectives,
+            transformation_names=[["LLMLingua2"]],
             config=self.config,
         )
