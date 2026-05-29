@@ -65,6 +65,7 @@ defaults:
     - summarization
     - truncated_prompt
     - random_deletion
+    - llmlingua2
 
   # Qwen3 end-of-turn token — appended to the task's own stop list.
   extra_stop_sequences: ["<|im_end|>"]

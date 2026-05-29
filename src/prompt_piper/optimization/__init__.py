@@ -17,7 +17,13 @@ from .evaluator import ConstantEvaluator, Evaluator, MockEvaluator
 from .tokenizer import CharTokenizer, Tokenizer, TiktokenTokenizer, WhitespaceTokenizer
 from .problem import PromptCompressionProblem
 from .algorithms import available_algorithms, build_algorithm
-from .baselines import AllTransformationsBaseline, BaselineResult, NoCompressionBaseline, RandomSearchBaseline
+from .baselines import (
+    AllTransformationsBaseline,
+    BaselineResult,
+    LLMLingua2Baseline,
+    NoCompressionBaseline,
+    RandomSearchBaseline,
+)
 from .runner import Experiment, ExperimentResult
 
 __all__ = [
@@ -35,6 +41,7 @@ __all__ = [
     "NoCompressionBaseline",
     "AllTransformationsBaseline",
     "RandomSearchBaseline",
+    "LLMLingua2Baseline",
     "BaselineResult",
     "Experiment",
     "ExperimentResult",

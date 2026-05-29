@@ -64,6 +64,7 @@ defaults:
     - summarization
     - truncated_prompt
     - random_deletion
+    - llmlingua2
 
   # Gemma end-of-turn token — appended to the task's own stop list.
   extra_stop_sequences: ["<end_of_turn>"]

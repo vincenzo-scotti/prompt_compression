@@ -23,6 +23,7 @@ from .algorithms import build_algorithm
 from .baselines import (
     AllTransformationsBaseline,
     BaselineResult,
+    LLMLingua2Baseline,
     MultiArmedBanditBaseline,
     NoCompressionBaseline,
     RandomDeletionBaseline,
@@ -43,6 +44,7 @@ _BASELINE_REGISTRY = {
     "random_deletion": RandomDeletionBaseline,
     "summarization": SummarizationBaseline,
     "multi_armed_bandit": MultiArmedBanditBaseline,
+    "llmlingua2": LLMLingua2Baseline,
 }
 
 
