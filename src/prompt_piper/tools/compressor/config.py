@@ -125,6 +125,13 @@ class RunConfig:
     #: (i.e. compress the fully formatted prompt).  Set to
     #: ``"prompt_0shot"`` to compress only the 0-shot prompt.
     compress_field: str | None = None
+    #: Verbose task-specific instruction prepended to the compress_field text
+    #: before the optimisation search.  When set the effective compress target
+    #: becomes ``"verbose_instruction"`` (a synthetic field built at dataset
+    #: load time as ``instruction_prefix + "\n\n" + <compress_field text>``).
+    #: This gives compression operators realistic, verbose material to work on
+    #: rather than the minimal benchmark-style prompts that lm-eval generates.
+    instruction_prefix: str | None = None
     #: Override generation kwargs passed to :class:`~prompt_piper.backends.lm_eval.LMEvalEvaluator`.
     #: ``None`` (default) reads the task's own ``generation_kwargs`` config, which is
     #: correct for most tasks (e.g. GSM8K ships with ``until: ["Question:", ...]``).
@@ -154,6 +161,19 @@ class RunConfig:
     @property
     def run_name(self) -> str:
         return self.name or f"{self.task}_{self.algorithm}"
+
+    @property
+    def effective_compress_field(self) -> str | None:
+        """Compression target field, accounting for instruction_prefix injection.
+
+        When ``instruction_prefix`` is set the runner builds a synthetic
+        ``"verbose_instruction"`` field and this property returns that name so
+        all downstream components (problem, fitter, exp config) use it
+        consistently without the caller needing to know about the injection.
+        """
+        if self.instruction_prefix:
+            return "verbose_instruction"
+        return self.compress_field
 
 
 # ---------------------------------------------------------------------------
@@ -205,17 +225,18 @@ class CompressorConfig:
         except ImportError as exc:
             raise ImportError("Install PyYAML: pip install pyyaml") from exc
 
+        path = Path(path)
         with open(path) as f:
             raw: dict = yaml.safe_load(f) or {}
 
-        return cls._from_dict(raw)
+        return cls._from_dict(raw, config_dir=path.parent)
 
     @classmethod
     def from_dict(cls, d: dict) -> "CompressorConfig":
         return cls._from_dict(d)
 
     @classmethod
-    def _from_dict(cls, raw: dict) -> "CompressorConfig":
+    def _from_dict(cls, raw: dict, config_dir: Path | None = None) -> "CompressorConfig":
         model_raw = raw.get("model", {})
         model = ModelConfig(
             type=model_raw.get("type", "hf"),
@@ -232,8 +253,21 @@ class CompressorConfig:
 
         defaults: dict = raw.get("defaults", {})
 
+        # Load optional task library (shared per-task settings)
+        task_library: dict[str, dict] = {}
+        task_lib_path = raw.get("task_library")
+        if task_lib_path and config_dir is not None:
+            try:
+                import yaml
+            except ImportError as exc:
+                raise ImportError("Install PyYAML: pip install pyyaml") from exc
+            task_lib_full = config_dir / task_lib_path
+            with open(task_lib_full) as f:
+                lib_raw: dict = yaml.safe_load(f) or {}
+            task_library = lib_raw.get("tasks", {})
+
         runs_raw: list[dict] = raw.get("runs", [])
-        runs = [cls._build_run(r, defaults) for r in runs_raw]
+        runs = [cls._build_run(r, defaults, task_library) for r in runs_raw]
 
         transfer_raw = raw.get("transferability", {})
         transferability = TransferabilityConfig(
@@ -245,9 +279,13 @@ class CompressorConfig:
                    transferability=transferability)
 
     @staticmethod
-    def _build_run(run_raw: dict, defaults: dict) -> RunConfig:
-        """Merge defaults → run-level overrides into a RunConfig."""
+    def _build_run(run_raw: dict, defaults: dict, task_library: dict | None = None) -> RunConfig:
+        """Merge defaults → task-library → run-level overrides into a RunConfig."""
         merged = copy.deepcopy(defaults)
+        # Task-library settings override global defaults but are overridden by per-run keys
+        task_name = run_raw.get("task", "")
+        if task_library and task_name in task_library:
+            merged.update(copy.deepcopy(task_library[task_name]))
         merged.update(run_raw)
         # Keep only known fields
         kwargs = {k: v for k, v in merged.items() if k in _RUN_FIELDS}

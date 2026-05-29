@@ -515,14 +515,25 @@ class CompressorRunner:
     ) -> list[dict]:
         """Return a list of sample dicts for the given split."""
         if self._dry_run or backend["task"] is None:
-            # Generate synthetic data for dry runs
-            return self._synthetic_dataset(n=max(run_cfg.n_search, run_cfg.n_test or 0) + 10)
+            samples = self._synthetic_dataset(n=max(run_cfg.n_search, run_cfg.n_test or 0) + 10)
+            if run_cfg.instruction_prefix:
+                prefix = run_cfg.instruction_prefix.rstrip("\n")
+                base_field = run_cfg.compress_field or "prompt_0shot"
+                for sample in samples:
+                    base_text = sample.get(base_field, sample.get("prompt_0shot", ""))
+                    sample["verbose_instruction"] = prefix + "\n\n" + base_text
+            return samples
 
         # When compressing a field other than the main prompt, ask the dataset
         # to also store the 0-shot template under that field name.
+        # When instruction_prefix is set, we always need prompt_0shot so we can
+        # build the verbose_instruction field.
+        raw_compress = run_cfg.compress_field
+        if run_cfg.instruction_prefix and not raw_compress:
+            raw_compress = "prompt_0shot"
         template_field = (
-            run_cfg.compress_field
-            if run_cfg.compress_field and run_cfg.compress_field != run_cfg.prompt_field
+            raw_compress
+            if raw_compress and raw_compress != run_cfg.prompt_field
             else None
         )
 
@@ -536,7 +547,18 @@ class CompressorRunner:
             apply_chat_template=run_cfg.apply_chat_template,
             fewshot_as_multiturn=run_cfg.fewshot_as_multiturn,
         )
-        return ds.as_list()
+        samples = ds.as_list()
+
+        # Inject verbose_instruction when an instruction_prefix is configured.
+        # The combined field becomes the compression target (see effective_compress_field).
+        if run_cfg.instruction_prefix:
+            prefix = run_cfg.instruction_prefix.rstrip("\n")
+            base_field = raw_compress or "prompt_0shot"
+            for sample in samples:
+                base_text = sample.get(base_field, sample.get("prompt_0shot", ""))
+                sample["verbose_instruction"] = prefix + "\n\n" + base_text
+
+        return samples
 
     @staticmethod
     def _synthetic_dataset(n: int = 50) -> list[dict]:
@@ -577,7 +599,7 @@ class CompressorRunner:
     def _make_exp_config(run_cfg: RunConfig, n_subset: int) -> ExperimentConfig:
         return ExperimentConfig(
             prompt_field=run_cfg.prompt_field,
-            compress_field=run_cfg.compress_field,
+            compress_field=run_cfg.effective_compress_field,
             n_subset=n_subset,
             subset_seed=run_cfg.subset_seed,
             algorithm=run_cfg.algorithm,
@@ -612,8 +634,8 @@ class CompressorRunner:
         fitter = DatasetVocabularyFitter(
             dataset,
             prompt_field=run_cfg.prompt_field,
-            template_field=run_cfg.compress_field,
-            compress_field=run_cfg.compress_field,
+            template_field=run_cfg.effective_compress_field,
+            compress_field=run_cfg.effective_compress_field,
             seed=run_cfg.seed,
             backend=semantic_backend,  # None → corpus-only; set → also LLM-backed
         )

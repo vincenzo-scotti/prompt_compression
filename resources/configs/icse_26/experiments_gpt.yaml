@@ -6,45 +6,41 @@
 # Without this, gpt-5.4-mini-2026-03-17 would have stop sequences stripped
 # and temperature forced to 1.
 #
-# Semantic operators (O23–O28) are enabled with a length guardrail: if a
-# semantic operator produces longer output than its input it reverts to the
-# original, so operators can only compress or be neutral, never expand.
-# mbpp_instruct is excluded: pass@1 code evaluation does not work via the
-# OpenAI chat-completions API (use HF models for MBPP).
+# Semantic operators (O23–O28): a universal guardrail in Transformation.__call__
+# reverts any operator that expands or empties the text, so operators can only
+# compress or be neutral, never expand.
 #
-# Tasks (4 benchmarks):
-#   mmlu_pro_computer_science                  — CS knowledge, acc (CoT), 5-shot, compress instruction only
-#   gsm8k_cot                                  — math reasoning, 8-shot CoT, compress instruction only
-#   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match (CoT), 3-shot, compress instruction only
-#   leaderboard_musr_murder_mysteries          — multi-step reasoning, acc_norm, 0-shot, compress full prompt
+# Task-specific settings (num_fewshot, compress_field, generation_kwargs,
+# instruction_prefix) are defined in tasks.yaml and merged automatically.
+# instruction_prefix injects a verbose realistic system prompt into each sample
+# as `verbose_instruction`, giving compression operators richer material.
 #
-# Each task is run twice: once with NSGA-II (primary algorithm) and once with
-# the Multi-Armed Bandit (MAB, Thompson Sampling) as a self-contained approach.
-# MAB uses the same evaluation budget as NSGA-II (pop_size × n_gen evaluations).
+# Tasks (5 benchmarks):
+#   mbpp_instruct                                  — code gen, pass@1, 3-shot
+#   mmlu_pro_computer_science                      — CS knowledge, acc, 5-shot CoT
+#   gsm8k_cot                                      — math reasoning, 8-shot CoT
+#   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match, 3-shot
+#   leaderboard_musr_murder_mysteries              — multi-step reasoning, acc_norm, 0-shot
 #
-# Transferability analysis: after all runs, Pareto solutions from gsm8k_cot_nsga2
-# are re-evaluated on bbh_logical_deduction and vice versa.
-#
+# Each task runs twice: NSGA-II (primary) and MAB (Thompson Sampling).
 # Requires: OPENAI_API_KEY
+
+task_library: ./tasks.yaml
 
 model:
   type: openai-chat
   name: gpt-5.4-mini-2026-03-17
   kwargs:
-    # gpt-5.4-mini does not support the 'stop' parameter; drop it from all
-    # API calls (stop-based termination relies on max_gen_toks as fallback).
+    # gpt-5.4-mini does not support the 'stop' parameter.
     drop_stop_sequences: true
-    # num_concurrent=4: run four API requests in parallel to reduce wall-clock
-    # time (safe for the chat-completions endpoint).
+    # Run four API requests in parallel to reduce wall-clock time.
     num_concurrent: 4
 
 output:
   dir: ./results/icse_26/gpt-5.4-mini-2026-03-17
-  overwrite: false        # set true to force re-run; false enables restart
+  overwrite: false
 
 defaults:
-  compress_field: prompt_0shot
-
   apply_chat_template: false
   fewshot_as_multiturn: false
 
@@ -60,8 +56,6 @@ defaults:
   seed: 42
   subset_seed: 42
 
-  # NSGA-II baselines — multi_armed_bandit is now a self-contained approach
-  # and runs as a separate first-class experiment (see *_mab runs below).
   baselines:
     - no_compression
     - all_transformations
@@ -71,15 +65,10 @@ defaults:
     - random_deletion
 
   extra_stop_sequences: null
-
   metric_key: null
-  search_split: test
-  test_split: test
 
 
 # ── Transferability analysis ────────────────────────────────────────────────
-# Exchange Pareto frontiers between the two reasoning tasks (GSM8K-CoT and
-# BBH-Logical-Deduction) to measure cross-task generalisation.
 transferability:
   enabled: true
   pairs:
@@ -89,129 +78,50 @@ transferability:
 
 runs:
 
-  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
-  # Computer Science subset of MMLU-Pro — ~1,800 problems, acc (CoT), 5-shot.
-  # compress_field=prompt_0shot: compress only the question; leave CoT demonstrations intact.
-  # max_gen_toks: 1024 — enough for a CoT chain + final answer letter.
+  # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
+  # Task settings (num_fewshot, compress_field, generation_kwargs,
+  # instruction_prefix) come from tasks.yaml.
+  # Requires: HF_ALLOW_CODE_EVAL=1
+  - name: mbpp_instruct_nsga2
+    task: mbpp_instruct
+    algorithm: nsga2
 
+  - name: mbpp_instruct_mab
+    task: mbpp_instruct
+    algorithm: mab
+
+  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
   - name: mmlu_pro_cs_nsga2
     task: mmlu_pro_computer_science
     algorithm: nsga2
-    num_fewshot: 5
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
 
   - name: mmlu_pro_cs_mab
     task: mmlu_pro_computer_science
     algorithm: mab
-    num_fewshot: 5
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
-    baselines:
-      - no_compression
-      - all_transformations
-      - random_search
-      - summarization
-      - truncated_prompt
-      - random_deletion
 
   # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
-  # Grade-school math reasoning — 1,319 test problems, 8-shot CoT.
-  # metric_key: null — use lm-eval's default first metric (exact_match in 0.4.x).
-  # compress_field=prompt_0shot: compress only the question; leave CoT shots intact.
-  # max_gen_toks: 1024 — enough for a full arithmetic chain-of-thought.
-
   - name: gsm8k_cot_nsga2
     task: gsm8k_cot
     algorithm: nsga2
-    num_fewshot: 8
-    metric_key: null
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
 
   - name: gsm8k_cot_mab
     task: gsm8k_cot
     algorithm: mab
-    num_fewshot: 8
-    metric_key: null
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
-    baselines:
-      - no_compression
-      - all_transformations
-      - random_search
-      - summarization
-      - truncated_prompt
-      - random_deletion
 
   # ═══════════════════════════════════════════════ BBH – Logical Deduction ════
-  # BIG-Bench Hard: order 7 objects from clues — 250 problems, exact match, 3-shot CoT.
-  # compress_field=prompt_0shot: compress only the question; leave CoT shots intact.
-  # max_gen_toks: 1024 — enough for a reasoning chain + final ordered list.
-
   - name: bbh_logical_deduction_nsga2
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: nsga2
-    num_fewshot: 3
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
 
   - name: bbh_logical_deduction_mab
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: mab
-    num_fewshot: 3
-    compress_field: prompt_0shot
-    search_split: test
-    test_split: test
-    generation_kwargs:
-      max_gen_toks: 1024
-    baselines:
-      - no_compression
-      - all_transformations
-      - random_search
-      - summarization
-      - truncated_prompt
-      - random_deletion
 
   # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
-  # Multi-step soft reasoning — 0-shot, acc_norm (loglikelihood over answer choices).
-  # compress_field=null: no instruction/shots split; compress the full prompt.
-  # No max_gen_toks needed: loglikelihood task, no generation.
-
   - name: musr_murder_mysteries_nsga2
     task: leaderboard_musr_murder_mysteries
     algorithm: nsga2
-    num_fewshot: 0
-    compress_field: null
-    search_split: test
-    test_split: test
 
   - name: musr_murder_mysteries_mab
     task: leaderboard_musr_murder_mysteries
     algorithm: mab
-    num_fewshot: 0
-    compress_field: null
-    search_split: test
-    test_split: test
-    baselines:
-      - no_compression
-      - all_transformations
-      - random_search
-      - summarization
-      - truncated_prompt
-      - random_deletion

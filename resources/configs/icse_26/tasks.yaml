@@ -1,0 +1,160 @@
+# Task library — shared source of truth for all model configs in icse_26.
+#
+# Each task entry defines the settings that are FIXED regardless of which model
+# is evaluated. Model configs reference this file via `task_library: ./tasks.yaml`
+# and inherit these settings with priority:
+#
+#   Python RunConfig defaults
+#     < model-level `defaults:`
+#     < task library (this file)
+#     < per-run overrides in the model config
+#
+# Keys must match RunConfig fields exactly.
+#
+# instruction_prefix:
+#   A verbose, realistic system prompt prepended to the compress_field text.
+#   The combined text is stored as `verbose_instruction` in each dataset sample
+#   and becomes the compression target. This gives the compression operators
+#   richer material than the minimal benchmark-style prompts that lm-eval
+#   produces. After compression, only the compressed `verbose_instruction` is
+#   used; the full prompt with few-shot examples is reconstructed around it.
+#
+#   CRITICAL — output format must match lm-eval's extraction regex exactly:
+#     gsm8k_cot        → "The answer is N."        (regex: The answer is [-0-9.,]+.)
+#     mmlu_pro         → "The answer is (X)."      (regex: answer is \(?[A-J]\)?)
+#     bbh logical ded. → "So the answer is (X)."   (regex: (?<=the answer is )(.*)(?=.))
+#     musr             → loglikelihood task; no generation, no instruction_prefix
+#     mbpp_instruct    → lm-eval opens a ```python block via gen_prefix; extraction
+#                        reads code inside that block; do NOT instruct on code fences
+
+tasks:
+
+  # ══════════════════════════════════════════════════════════════════ MBPP ════
+  # mbpp_instruct: pass@1 Python code generation, 3-shot.
+  #https://huggingface.co/microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank
+  # lm-eval appends gen_prefix="\n```python\n" to the prompt, so the model
+  # begins generating inside an already-opened code block. The extraction
+  # filter reads code between triple backtick fences. Do NOT tell the model
+  # to avoid fences — they are required for extraction.
+  #
+  # The 3 few-shot examples already demonstrate the full format (function +
+  # closing ```). The instruction_prefix focuses on task understanding and
+  # correctness criteria only.
+  mbpp_instruct:
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 256
+    instruction_prefix: |
+      You are an expert Python programmer. Your task is to implement a Python
+      function that satisfies the given specification and passes all provided
+      unit tests.
+
+      Requirements:
+      - The function signature must exactly match the one in the docstring.
+      - The implementation must be complete and correct — handle all edge cases
+        implied by the tests.
+      - Do not import modules outside the Python standard library unless
+        the problem explicitly requires them.
+      - Write only the function; do not include a main guard or example calls.
+
+  # ══════════════════════════════════════════════════════════════ MMLU-Pro ════
+  # mmlu_pro_computer_science: multiple-choice CS knowledge with CoT, 5-shot.
+  # compress_field=prompt_0shot: compress question + answer choices only;
+  # CoT few-shot demonstrations are left intact.
+  #
+  # lm-eval extraction regex: answer is \(?([ABCDEFGHIJ])\)?
+  # Few-shot CoT examples end with: "The answer is (X)."
+  # → instruction must say "The answer is (X)." (letter in parentheses, no colon)
+  mmlu_pro_computer_science:
+    num_fewshot: 5
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    instruction_prefix: |
+      You are an expert computer science assistant. You will https://huggingface.co/microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbankbe given a
+      multiple-choice question drawn from topics including algorithms, data
+      structures, operating systems, computer networks, databases, software
+      engineering, and computer architecture.
+
+      Instructions:
+      - Read the question and all answer options carefully.
+      - Think step by step before selecting your answer.
+      - End your response with "The answer is (X)." where X is the letter of
+        the correct option (A through J). Use this exact format — the letter
+        must be in parentheses.
+
+  # ══════════════════════════════════════════════════════════════ GSM8K-CoT ════
+  # gsm8k_cot: grade-school math, 8-shot chain-of-thought.
+  # compress_field=prompt_0shot: compress question only; CoT shots intact.
+  #
+  # lm-eval extraction regex (strict-match): The answer is (\-?[0-9\.\,]+).
+  # All 8 few-shot CoT examples end with: "The answer is N."
+  # → instruction must say "The answer is N." (no colon, period at end)
+  gsm8k_cot:
+    num_fewshot: 8
+    metric_key: null
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    instruction_prefix: |
+      You are a precise mathematical reasoning assistant. You will be given a
+      grade-school arithmetic word problem. Solve it step by step.
+
+      Instructions:
+      - Identify all quantities and relationships in the problem.
+      - Write out each arithmetic step explicitly, showing intermediate results.
+      - Perform each calculation carefully; do not skip steps.
+      - End your response with "The answer is N." where N is the final numeric
+        value. Use this exact format — no currency symbols, no units, no colon.
+
+  # ════════════════════════════════════════════════════ BBH Logical Deduction ═
+  # bbh_cot_fewshot_logical_deduction_seven_objects: order 7 objects from clues,
+  # exact match with CoT, 3-shot.
+  # compress_field=prompt_0shot: compress question only; CoT shots intact.
+  #
+  # lm-eval extraction regex (get-answer): (?<=the answer is )(.*)(?=.)
+  # All 3 few-shot CoT examples end with: "So the answer is (X)."
+  # → instruction must say "So the answer is (X)." (lowercase 'the', letter in parens)
+  bbh_cot_fewshot_logical_deduction_seven_objects:
+    num_fewshot: 3
+    compress_field: prompt_0shot
+    search_split: test
+    test_split: test
+    generation_kwargs:
+      max_gen_toks: 1024
+    instruction_prefix: |
+      You are a logical reasoning assistant. You will be given a set of clues
+      that constrain the relative order of seven named objects or entities.
+      Determine their complete ordering from first to last (or highest to
+      lowest, as specified by the problem).
+
+      Instructions:
+      - Read every clue carefully before drawing conclusions.
+      - Work through the clues systematically, eliminating impossible
+        positions for each item step by step.
+      - Show your full reasoning chain before stating the answer.
+      - End your response with "So the answer is (X)." where X is the letter
+        of the correct option from the list (e.g. (A), (B), (C)). Use this
+        exact format — lowercase 'the', letter in parentheses.
+
+  # ══════════════════════════════════════════════════ MuSR Murder Mysteries ════
+  # leaderboard_musr_murder_mysteries: multi-step soft reasoning, acc_norm,
+  # output_type=multiple_choice (loglikelihood over answer choices), 0-shot.
+  #
+  # This is a LOGLIKELIHOOD task — the model does NOT generate text. lm-eval
+  # scores the log-probability of each answer choice string. There is no
+  # extraction regex and no output format to specify. Setting instruction_prefix
+  # here would inject a verbose_instruction field but the model never reads it
+  # for generation. compress_field=null compresses the full prompt directly.
+  leaderboard_musr_murder_mysteries:
+    num_fewshot: 0
+    compress_field: null
+    search_split: test
+    test_split: test
