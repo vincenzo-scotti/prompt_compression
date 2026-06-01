@@ -165,12 +165,25 @@ class CompressorRunner:
         # Custom baselines (truncated_prompt, random_deletion) store all-zero
         # bit vectors which would evaluate as no-compression; run them on the
         # test problem directly instead.
-        _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion"}
+        # Baselines that need re-running (not bit-vector re-evaluation) on test data:
+        # - custom baselines use score_transform_fn (no bit vector to replay)
+        # - full-op baselines used a different problem instance during search;
+        #   their bit vectors have a different length than the search problem.
+        _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion", "llmlingua2"}
+        _FULL_OP_BASELINES = exp._FULL_OP_BASELINES  # {"all_transformations", "summarization"}
+
+        full_test_problem = None  # built lazily
         baseline_test: dict[str, tuple[float, float, float]] = {}
         for name, br in exp_result.baselines.items():
             t_bl_test = time.perf_counter()
             if name in _CUSTOM_BASELINES:
                 test_br = exp.run_baseline(name, problem=exp._build_problem(test_dataset))
+                avg_tok = float(test_br.avg_tokens.mean())
+                avg_perf = float(test_br.avg_performance.mean())
+            elif name in _FULL_OP_BASELINES:
+                if full_test_problem is None:
+                    full_test_problem = exp._build_full_problem(test_dataset)
+                test_br = exp.run_baseline(name, problem=full_test_problem)
                 avg_tok = float(test_br.avg_tokens.mean())
                 avg_perf = float(test_br.avg_performance.mean())
             else:
@@ -607,6 +620,7 @@ class CompressorRunner:
             n_gen=run_cfg.n_gen,
             seed=run_cfg.seed,
             transformation_ids=run_cfg.transformation_ids,
+            search_transformation_ids=run_cfg.search_transformation_ids,
             verbose=False,
         )
 

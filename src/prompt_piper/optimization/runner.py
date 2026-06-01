@@ -189,7 +189,12 @@ class Experiment:
         self._full_dataset = dataset
         self._evaluator = evaluator or MockEvaluator()
         self._tokenizer = tokenizer or WhitespaceTokenizer()
+        # Full operator pool (filtered by transformation_ids) — used by
+        # all_transformations and summarization baselines.
         self._transform_classes = self._resolve_transformations(transformations)
+        # Search-only pool (further filtered by search_transformation_ids) — used
+        # by NSGA-II, random_search, and multi_armed_bandit.
+        self._search_transform_classes = self._resolve_search_transformations()
         self._transformation_factory = transformation_factory or (lambda cls: cls())
 
     # ------------------------------------------------------------------
@@ -226,7 +231,7 @@ class Experiment:
         problem = self._build_problem(dataset_subset)
 
         if self.config.algorithm == "mab":
-            return self._run_mab(problem, baselines)
+            return self._run_mab(problem, dataset_subset, baselines)
 
         algorithm = build_algorithm(
             self.config.algorithm,
@@ -252,13 +257,9 @@ class Experiment:
         pareto_solutions, pareto_objectives, pareto_names = self._parse_result(res, problem)
         history = getattr(callback, "history", [])
 
-        baseline_results: dict[str, BaselineResult] = {}
-        baseline_elapsed: dict[str, float] = {}
-        if baselines:
-            for name in baselines:
-                t_bl = time.perf_counter()
-                baseline_results[name] = self.run_baseline(name, problem)
-                baseline_elapsed[name] = time.perf_counter() - t_bl
+        baseline_results, baseline_elapsed = self._run_baselines(
+            baselines or [], problem, dataset_subset
+        )
 
         return ExperimentResult(
             config=self.config,
@@ -275,6 +276,7 @@ class Experiment:
     def _run_mab(
         self,
         problem: PromptCompressionProblem,
+        dataset_subset: list[dict],
         baselines: list[str] | None,
     ) -> ExperimentResult:
         """Run Multi-Armed Bandit (Thompson Sampling) as the primary search.
@@ -297,13 +299,9 @@ class Experiment:
         pareto_objectives = mab_result.objectives    # (n_pareto, 2): [tokens, +perf]
         pareto_names = mab_result.transformation_names
 
-        baseline_results: dict[str, BaselineResult] = {}
-        baseline_elapsed: dict[str, float] = {}
-        if baselines:
-            for name in baselines:
-                t_bl = time.perf_counter()
-                baseline_results[name] = self.run_baseline(name, problem)
-                baseline_elapsed[name] = time.perf_counter() - t_bl
+        baseline_results, baseline_elapsed = self._run_baselines(
+            baselines or [], problem, dataset_subset
+        )
 
         return ExperimentResult(
             config=self.config,
@@ -385,6 +383,40 @@ class Experiment:
     # Internals
     # ------------------------------------------------------------------
 
+    # Baselines that must run on the full operator set (including semantic ops)
+    # so they remain meaningful even when the search is restricted to O1–O22.
+    _FULL_OP_BASELINES: frozenset[str] = frozenset({"all_transformations", "summarization"})
+
+    def _run_baselines(
+        self,
+        baselines: list[str],
+        search_problem: PromptCompressionProblem,
+        dataset_subset: list[dict],
+    ) -> tuple[dict[str, BaselineResult], dict[str, float]]:
+        """Run all baselines, routing full-op ones to a separate problem instance.
+
+        ``all_transformations`` and ``summarization`` always use the complete
+        operator set (``_transform_classes``) so that their results are
+        independent of ``search_transformation_ids``.  All other baselines
+        share the search problem and therefore operate in the same restricted
+        operator space as NSGA-II.
+        """
+        results: dict[str, BaselineResult] = {}
+        elapsed: dict[str, float] = {}
+        if not baselines:
+            return results, elapsed
+
+        needs_full = any(name in self._FULL_OP_BASELINES for name in baselines)
+        full_problem = self._build_full_problem(dataset_subset) if needs_full else None
+
+        for name in baselines:
+            t = time.perf_counter()
+            problem = full_problem if name in self._FULL_OP_BASELINES else search_problem
+            results[name] = self.run_baseline(name, problem)
+            elapsed[name] = time.perf_counter() - t
+
+        return results, elapsed
+
     def _resolve_transformations(
         self, classes: list[type[Transformation]] | None
     ) -> list[type[Transformation]]:
@@ -399,6 +431,23 @@ class Experiment:
                 )
         return pool
 
+    def _resolve_search_transformations(self) -> list[type[Transformation]]:
+        """Further restrict the full pool to the search-only subset.
+
+        When ``config.search_transformation_ids`` is ``None`` the full
+        ``_transform_classes`` pool is returned unchanged.
+        """
+        if self.config.search_transformation_ids is None:
+            return self._transform_classes
+        id_set = set(self.config.search_transformation_ids)
+        pool = [T for T in self._transform_classes if T.id in id_set]
+        if not pool:
+            raise ValueError(
+                f"No transformations matched search_transformation_ids "
+                f"{self.config.search_transformation_ids!r}"
+            )
+        return pool
+
     def _resolve_scoped_classes(
         self, all_classes: list[type[Transformation]]
     ) -> tuple[
@@ -406,19 +455,16 @@ class Experiment:
         list[type[Transformation]],
         list[type[Transformation]],
     ]:
-        """Return (instruction_classes, shot_classes, data_classes) filtered
-        from the full pool and respecting ``transformation_ids``."""
-        id_set = (
-            set(self.config.transformation_ids)
-            if self.config.transformation_ids is not None
-            else None
-        )
+        """Return (instruction_classes, shot_classes, data_classes) for *all_classes*.
+
+        Filters each scope list to the intersection with *all_classes* — the
+        caller is responsible for pre-filtering *all_classes* to the desired
+        operator pool (search-only or full).
+        """
+        allowed = set(all_classes)
 
         def _filter(scope_pool: list[type[Transformation]]) -> list[type[Transformation]]:
-            result = [cls for cls in scope_pool if cls in set(all_classes)]
-            if id_set is not None:
-                result = [cls for cls in result if cls.id in id_set]
-            return result
+            return [cls for cls in scope_pool if cls in allowed]
 
         i_classes = _filter(INSTRUCTION_OPS)
         s_classes = _filter(SHOT_OPS)
@@ -434,11 +480,19 @@ class Experiment:
         return rng.sample(self._full_dataset, n)
 
     def _build_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
-        """Instantiate the pymoo problem with section-aware transformation objects."""
+        """Build the search problem using the restricted operator set."""
+        return self._build_problem_with_classes(dataset, self._search_transform_classes)
+
+    def _build_full_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
+        """Build a problem with the full operator set (for all_transformations / summarization)."""
+        return self._build_problem_with_classes(dataset, self._transform_classes)
+
+    def _build_problem_with_classes(
+        self, dataset: list[dict], transform_classes: list[type[Transformation]]
+    ) -> PromptCompressionProblem:
+        """Instantiate the pymoo problem using the given operator pool."""
         compress_field = self.config.compress_field or self.config.prompt_field
-        i_classes, s_classes, d_classes = self._resolve_scoped_classes(
-            self._transform_classes
-        )
+        i_classes, s_classes, d_classes = self._resolve_scoped_classes(transform_classes)
         # When compressing a sub-field (e.g. 'prompt_0shot'), the few-shot
         # demonstrations are loaded from sample['_shots'] for assembly/evaluation
         # but must remain intact — only data-section operators are applicable.
