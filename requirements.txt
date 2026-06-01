@@ -5,3 +5,5 @@ lm_eval[hf]==0.4.11
 lm-eval[api]
 pymoo==0.6.1.6
 nltk==3.9.1
+bitsandbytes>=0.46.1
+llmlingua

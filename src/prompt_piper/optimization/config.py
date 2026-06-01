@@ -56,6 +56,13 @@ class ExperimentConfig:
 
     # --- Search space ---
     transformation_ids: list[str] | None = None  # None → all 28
+    #: Further restrict the search to this subset of operator IDs.  When set,
+    #: NSGA-II (and budget-matched baselines random_search / multi_armed_bandit)
+    #: only explore these operators.  ``all_transformations`` and
+    #: ``summarization`` baselines always use the full ``transformation_ids``
+    #: set so they remain valid comparison points.  ``None`` (default) means no
+    #: extra restriction beyond ``transformation_ids``.
+    search_transformation_ids: list[str] | None = None
 
     # --- Section-aware compression ---
     #: When True (default), also compress the per-sample input data section.

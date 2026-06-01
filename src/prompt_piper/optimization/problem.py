@@ -113,6 +113,12 @@ class PromptCompressionProblem(Problem):
         self._prompt_field = prompt_field
         self._compress_field = compress_field or prompt_field
 
+        # Cross-generation caches: populated on first evaluation, reused on
+        # subsequent calls.  Keys use (sample_index, compressed_text) so that
+        # the same (sample, compression) pair is never sent to the LLM twice.
+        self._eval_cache: dict[tuple[int, str], float] = {}
+        self._token_cache: dict[str, int] = {}
+
         super().__init__(
             n_var=n_var,
             n_obj=2,
@@ -126,14 +132,16 @@ class PromptCompressionProblem(Problem):
     # ------------------------------------------------------------------
 
     def _evaluate(self, x: np.ndarray, out: dict, *args, **kwargs) -> None:
-        """Evaluate all solutions in a generation with deduplication.
+        """Evaluate all solutions in a generation with cross-generation caching.
 
-        All compressed texts for every solution in the population are
-        collected first, then deduplicated on (sample_index, text) before
-        a single :meth:`Evaluator.evaluate_batch` call.  This avoids
-        redundant LLM evaluations when multiple solutions produce identical
-        compressed output for the same sample (e.g. the identity solution
-        appearing in many individuals).
+        Two layers of deduplication are applied:
+
+        1. **Cross-generation cache** (``_eval_cache``): any (sample_index,
+           compressed_text) pair whose score is already known is skipped
+           entirely.  This eliminates redundant LLM calls across generations
+           when solutions converge to the same compressed output.
+        2. **Within-generation deduplication**: novel pairs are collected once
+           and sent to the evaluator in a single batched call.
         """
         n_solutions = len(x)
 
@@ -143,8 +151,8 @@ class PromptCompressionProblem(Problem):
             originals, compressed = self._compress_bits(bits)
             per_solution.append((originals, compressed))
 
-        # Phase 2: build deduplicated batch
-        key_to_eval_idx: dict[tuple, int] = {}
+        # Phase 2: collect pairs not already in the cross-generation cache
+        key_to_new_idx: dict[tuple, int] = {}
         unique_originals: list[str] = []
         unique_compressed: list[str] = []
         unique_docs: list[dict] = []
@@ -152,24 +160,27 @@ class PromptCompressionProblem(Problem):
         for originals, compressed in per_solution:
             for j, (orig, comp) in enumerate(zip(originals, compressed)):
                 key = (j, comp)
-                if key not in key_to_eval_idx:
-                    key_to_eval_idx[key] = len(unique_compressed)
+                if key not in self._eval_cache and key not in key_to_new_idx:
+                    key_to_new_idx[key] = len(unique_compressed)
                     unique_originals.append(orig)
                     unique_compressed.append(comp)
                     unique_docs.append(self._dataset[j] if j < len(self._dataset) else {})
 
-        # Phase 3: single batch evaluation
-        unique_perfs = self._evaluator.evaluate_batch(
-            unique_originals, unique_compressed, unique_docs
-        )
+        # Phase 3: evaluate novel pairs and populate the cross-generation cache
+        if unique_compressed:
+            new_perfs = self._evaluator.evaluate_batch(
+                unique_originals, unique_compressed, unique_docs
+            )
+            for key, idx in key_to_new_idx.items():
+                self._eval_cache[key] = new_perfs[idx]
 
-        # Phase 4: reconstruct per-solution objectives
+        # Phase 4: reconstruct per-solution objectives entirely from cache
         F = np.empty((n_solutions, 2), dtype=float)
         for i, (originals, compressed) in enumerate(per_solution):
             n = len(originals)
-            total_tokens = sum(self._tokenizer.count(c) for c in compressed)
+            total_tokens = sum(self._count_tokens(c) for c in compressed)
             total_perf = sum(
-                unique_perfs[key_to_eval_idx[(j, comp)]]
+                self._eval_cache[(j, comp)]
                 for j, comp in enumerate(compressed)
             )
             F[i, 0] = total_tokens / n
@@ -215,12 +226,32 @@ class PromptCompressionProblem(Problem):
     # Internals
     # ------------------------------------------------------------------
 
+    def _count_tokens(self, text: str) -> int:
+        """Token count with a simple string-keyed cache."""
+        if text not in self._token_cache:
+            self._token_cache[text] = self._tokenizer.count(text)
+        return self._token_cache[text]
+
     def _score_bits(self, bits) -> tuple[float, float]:
         originals, compressed = self._compress_bits(bits)
         n = max(len(originals), 1)
-        total_tokens = sum(self._tokenizer.count(c) for c in compressed)
-        perfs = self._evaluator.evaluate_batch(originals, compressed, self._dataset)
-        return total_tokens / n, sum(perfs) / n
+        total_tokens = sum(self._count_tokens(c) for c in compressed)
+
+        new_j, new_orig, new_comp, new_docs = [], [], [], []
+        for j, (orig, comp) in enumerate(zip(originals, compressed)):
+            if (j, comp) not in self._eval_cache:
+                new_j.append(j)
+                new_orig.append(orig)
+                new_comp.append(comp)
+                new_docs.append(self._dataset[j] if j < len(self._dataset) else {})
+
+        if new_comp:
+            new_perfs = self._evaluator.evaluate_batch(new_orig, new_comp, new_docs)
+            for j, comp, perf in zip(new_j, new_comp, new_perfs):
+                self._eval_cache[(j, comp)] = perf
+
+        total_perf = sum(self._eval_cache[(j, comp)] for j, comp in enumerate(compressed))
+        return total_tokens / n, total_perf / n
 
     # ---------- Compression (no evaluation) ----------
 

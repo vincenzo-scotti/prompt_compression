@@ -49,7 +49,7 @@ defaults:
   use_fitting: true
   use_llm_for_semantic: true
 
-  n_search: 20
+  n_search: 50
   n_test: 50
   algorithm: nsga2
   pop_size: 50
@@ -62,6 +62,7 @@ defaults:
     - no_compression
     - all_transformations
     - random_search
+    - multi_armed_bandit
     - summarization
     - truncated_prompt
     - random_deletion
@@ -69,6 +70,30 @@ defaults:
 
   # Qwen3 end-of-turn token — appended to the task's own stop list.
   extra_stop_sequences: ["<|im_end|>"]
+
+  search_transformation_ids:
+    - O1
+    - O2
+    - O3
+    - O4
+    - O5
+    - O6
+    - O7
+    - O8
+    - O9
+    - O10
+    - O11
+    - O12
+    - O13
+    - O14
+    - O15
+    - O16
+    - O17
+    - O18
+    - O19
+    - O20
+    - O21
+    - O22
 
   metric_key: null
 
@@ -88,42 +113,22 @@ runs:
     task: mbpp_instruct
     algorithm: nsga2
 
-  - name: mbpp_instruct_mab
-    task: mbpp_instruct
-    algorithm: mab
-
   # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
   - name: mmlu_pro_cs_nsga2
     task: mmlu_pro_computer_science
     algorithm: nsga2
-
-  - name: mmlu_pro_cs_mab
-    task: mmlu_pro_computer_science
-    algorithm: mab
 
   # ═══════════════════════════════════════════════ GSM8K-CoT ══════════════════
   - name: gsm8k_cot_nsga2
     task: gsm8k_cot
     algorithm: nsga2
 
-  - name: gsm8k_cot_mab
-    task: gsm8k_cot
-    algorithm: mab
-
   # ═══════════════════════════════════════════════ BBH – Logical Deduction ════
   - name: bbh_logical_deduction_nsga2
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: nsga2
 
-  - name: bbh_logical_deduction_mab
-    task: bbh_cot_fewshot_logical_deduction_seven_objects
-    algorithm: mab
-
   # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
   - name: musr_murder_mysteries_nsga2
     task: leaderboard_musr_murder_mysteries
     algorithm: nsga2
-
-  - name: musr_murder_mysteries_mab
-    task: leaderboard_musr_murder_mysteries
-    algorithm: mab

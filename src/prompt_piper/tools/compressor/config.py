@@ -120,6 +120,10 @@ class RunConfig:
     seed: int = 42
     subset_seed: int = 42
     transformation_ids: list[str] | None = None
+    #: Restrict the NSGA-II / MAB / random_search operator pool to these IDs.
+    #: ``all_transformations`` and ``summarization`` baselines always use the
+    #: full ``transformation_ids`` set.  ``None`` (default) = no restriction.
+    search_transformation_ids: list[str] | None = None
     prompt_field: str = "prompt"
     #: Field to apply transformations to.  ``None`` means use ``prompt_field``
     #: (i.e. compress the fully formatted prompt).  Set to
