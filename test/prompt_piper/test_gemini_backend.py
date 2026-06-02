@@ -99,8 +99,14 @@ class TestGeminiCreatePayload:
     def test_seed_absent(self):
         assert "seed" not in _payload(_make_gemini_model())
 
-    def test_max_tokens_value_matches_gen_kwargs(self):
-        assert _payload(_make_gemini_model(), max_gen_toks=1024)["max_tokens"] == 1024
+    def test_max_tokens_bumped_for_thinking_model(self):
+        # Gemini Flash 3+ is a thinking model: max_tokens covers both the
+        # internal chain-of-thought (~1000-1500 tokens) and the visible output.
+        # Values below 4096 are raised to 4096 so the model has enough budget
+        # for a complete response; larger values are left unchanged.
+        assert _payload(_make_gemini_model(), max_gen_toks=256)["max_tokens"] == 4096
+        assert _payload(_make_gemini_model(), max_gen_toks=1024)["max_tokens"] == 4096
+        assert _payload(_make_gemini_model(), max_gen_toks=8192)["max_tokens"] == 8192
 
     def test_model_field_set(self):
         assert _payload(_make_gemini_model("gemini-2.0-flash"))["model"] == "gemini-2.0-flash"
