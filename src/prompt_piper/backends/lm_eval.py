@@ -155,6 +155,18 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                     seed=seed, eos=eos, **kw
                 )
                 payload.pop("seed", None)
+                # Gemini rejects stop=[] with a 400 error ("Value is not a string").
+                # Remove the key when the stop list is empty so the model generates
+                # until max_tokens without explicit stop sequences.
+                if "stop" in payload and not payload["stop"]:
+                    payload.pop("stop", None)
+                # Gemini Flash 3+ is a thinking model: max_tokens covers both
+                # internal chain-of-thought (~1000-1500 tokens) AND visible output.
+                # The thinking_config parameter is not supported on the OpenAI-
+                # compatible endpoint, so we raise the budget instead to ensure
+                # the model has enough tokens for a complete visible response.
+                if "max_tokens" in payload:
+                    payload["max_tokens"] = max(payload["max_tokens"], 4096)
                 return payload
 
         return _GeminiChatCompletion(model=model_name, **kwargs)
@@ -773,7 +785,10 @@ i      ``process_results`` metric.
         cfg = getattr(first_task, "config", None)
         task_kwargs = dict(getattr(cfg, "generation_kwargs", None) or {})
         task_kwargs.setdefault("max_gen_toks", 256)
-        if not task_kwargs.get("until"):
+        # Only add a default stop-sequence when the task provided none at all.
+        # An explicit until=[] from the task config means "no stop sequences"
+        # (e.g. MBPP needs multi-line code generation) — preserve it.
+        if "until" not in task_kwargs:
             task_kwargs["until"] = ["\n", "\n\n"]
         if generation_kwargs is not None:
             self._gen_kwargs = {**task_kwargs, **generation_kwargs}
@@ -788,6 +803,37 @@ i      ``process_results`` metric.
                 if seq not in until:
                     until.append(seq)
             self._gen_kwargs = {**self._gen_kwargs, "until": until}
+
+        # Some API backends (e.g. Gemini) reject stop=[] with a 400 error.
+        # When the final until list is empty, remove the key entirely so the
+        # model generates up to max_gen_toks without explicit stop sequences.
+        if "until" in self._gen_kwargs and not self._gen_kwargs["until"]:
+            del self._gen_kwargs["until"]
+
+        # Strip newline-based stop sequences for chat/instruct models.
+        # lm-eval tasks like BBH set until=['\n\n'] as a completion-style
+        # separator between few-shot examples. Chat API models (Gemini, GPT,
+        # OpenAI-compatible) and HF instruct models with chat templates use
+        # structured messages, not raw text separators, so these stops cause
+        # premature truncation before the model completes its chain-of-thought.
+        # Only strip when the caller did not explicitly supply an 'until' key —
+        # an explicit override is honoured as-is.
+        _user_set_until = generation_kwargs is not None and "until" in generation_kwargs
+        if (
+            not _user_set_until
+            and "until" in self._gen_kwargs
+            and (_is_chat_model(self._model) or apply_chat_template)
+        ):
+            _stripped = [s for s in self._gen_kwargs["until"] if s not in ("\n", "\n\n")]
+            if len(_stripped) != len(self._gen_kwargs["until"]):
+                logger.info(
+                    "LMEvalEvaluator: stripped newline stop sequences for chat model "
+                    "(remaining: %r). Pass generation_kwargs={'until': [...]} to override.",
+                    _stripped,
+                )
+            self._gen_kwargs = {**self._gen_kwargs, "until": _stripped}
+            if not self._gen_kwargs["until"]:
+                del self._gen_kwargs["until"]
 
         self._metric_key = metric_key
 
@@ -906,7 +952,7 @@ i      ``process_results`` metric.
             actual_prompt = self._apply_chat_template(prompt)
         instance = _make_instance("generate_until", doc, (actual_prompt, self._gen_kwargs), 0)
         generated = _call_model(self._model, "generate_until", [instance])[0]
-        filtered = self._apply_filter_list(generated, task)
+        filtered = self._apply_filter_list(generated, task, doc)
 
         try:
             metrics: dict = task.process_results(doc, filtered)
@@ -947,7 +993,7 @@ i      ``process_results`` metric.
         for (orig_i, _, sample), generated in zip(valid, generated_texts):
             task = self._get_task(sample)
             doc = sample.get("_doc")
-            filtered = self._apply_filter_list(generated, task)
+            filtered = self._apply_filter_list(generated, task, doc)
             try:
                 metrics: dict = task.process_results(doc, filtered)
                 value = float(self._pick_metric(metrics))
@@ -1023,7 +1069,7 @@ i      ``process_results`` metric.
             )
             return prompt
 
-    def _apply_filter_list(self, generated: str, task) -> list[str]:
+    def _apply_filter_list(self, generated: str, task, doc: dict | None = None) -> list[str]:
         """Apply each filter in the task's ``filter_list`` independently.
 
         The full lm-eval harness applies every filter spec (e.g. GSM8K's
@@ -1031,6 +1077,13 @@ i      ``process_results`` metric.
         passes the full list of results to ``process_results``.  We reproduce
         that here: each filter spec is run independently and its output is
         collected in a list whose order matches the filter_list order.
+
+        Supports two filter function types:
+
+        * ``"regex"`` — standard regex extraction (group_select, etc.).
+        * ``"custom"`` — calls ``filter_fn([[result]], [doc])`` as a 1-sample
+          batch, matching the signature used by tasks like MBPP whose
+          ``build_predictions`` function extracts code from the raw generation.
 
         When a filter finds no match it falls back to the raw generated text
         for that slot, so ``process_results`` always receives a list of the
@@ -1073,6 +1126,40 @@ i      ``process_results`` metric.
                     except (re.error, IndexError):
                         ok = False
                         break
+                elif fn == "custom":
+                    # Custom batch filter: filter_fn(resps_batch, docs_batch)
+                    # where resps_batch[i] is a list of candidates for sample i.
+                    # Wrap as a 1-sample batch and unwrap the result.
+                    filter_fn = step.get("filter_fn")
+                    if callable(filter_fn):
+                        try:
+                            batch_out = filter_fn([[result]], [doc or {}])
+                            extracted = batch_out[0][0] if (batch_out and batch_out[0]) else ""
+                            if extracted:
+                                result = extracted
+                            else:
+                                # filter_fn returned empty (e.g. extract_code_blocks
+                                # fails when the model generates full ```...``` fences
+                                # without a gen_prefix being applied to the prompt).
+                                # Try complete fence extraction first, then strip
+                                # just the opening fence for truncated responses.
+                                m = re.search(
+                                    r"```(?:\w+)?\n?(.*?)\n?```", result, re.DOTALL
+                                )
+                                if m and m.group(1).strip():
+                                    result = m.group(1)
+                                else:
+                                    # Truncated response: no closing fence.
+                                    # Strip the opening fence so process_results
+                                    # can attempt execution on whatever code exists.
+                                    m2 = re.match(r"```(?:\w+)?\n?(.*)", result, re.DOTALL)
+                                    if m2 and m2.group(1).strip():
+                                        result = m2.group(1)
+                        except Exception as exc:
+                            logger.debug(
+                                "Custom filter %r raised %s; keeping raw text.",
+                                filter_spec.get("name"), exc,
+                            )
             results.append(result if (ok and result) else generated)
         return results
 

@@ -45,7 +45,7 @@ tasks:
     search_split: test
     test_split: test
     generation_kwargs:
-      max_gen_toks: 256
+      max_gen_toks: 512
     instruction_prefix: |
       You are an expert Python programmer. Your task is to implement a Python
       function that satisfies the given specification and passes all provided
@@ -61,8 +61,8 @@ tasks:
 
   # ══════════════════════════════════════════════════════════════ MMLU-Pro ════
   # mmlu_pro_computer_science: multiple-choice CS knowledge with CoT, 5-shot.
-  # compress_field=prompt_0shot: compress question + answer choices only;
-  # CoT few-shot demonstrations are left intact.
+  # compress_field=prompt_0shot: compress question + answer choices (instruction
+  # section); shot operators also compress the CoT demonstrations.
   #
   # lm-eval extraction regex: answer is \(?([ABCDEFGHIJ])\)?
   # Few-shot CoT examples end with: "The answer is (X)."
@@ -89,7 +89,8 @@ tasks:
 
   # ══════════════════════════════════════════════════════════════ GSM8K-CoT ════
   # gsm8k_cot: grade-school math, 8-shot chain-of-thought.
-  # compress_field=prompt_0shot: compress question only; CoT shots intact.
+  # compress_field=prompt_0shot: compress question (instruction section); shot
+  # operators also compress the 8 CoT demonstrations.
   #
   # lm-eval extraction regex (strict-match): The answer is (\-?[0-9\.\,]+).
   # All 8 few-shot CoT examples end with: "The answer is N."
@@ -116,7 +117,10 @@ tasks:
   # ════════════════════════════════════════════════════ BBH Logical Deduction ═
   # bbh_cot_fewshot_logical_deduction_seven_objects: order 7 objects from clues,
   # exact match with CoT, 3-shot.
-  # compress_field=prompt_0shot: compress question only; CoT shots intact.
+  # compress_field=prompt_0shot: compress question (instruction section); shot
+  # operators also compress the 3 CoT demonstrations.
+  # lm-eval task sets until=['\n\n']; this is stripped automatically for
+  # chat/instruct models to prevent premature CoT truncation.
   #
   # lm-eval extraction regex (get-answer): (?<=the answer is )(.*)(?=.)
   # All 3 few-shot CoT examples end with: "So the answer is (X)."

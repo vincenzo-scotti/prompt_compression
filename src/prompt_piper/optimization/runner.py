@@ -493,11 +493,6 @@ class Experiment:
         """Instantiate the pymoo problem using the given operator pool."""
         compress_field = self.config.compress_field or self.config.prompt_field
         i_classes, s_classes, d_classes = self._resolve_scoped_classes(transform_classes)
-        # When compressing a sub-field (e.g. 'prompt_0shot'), the few-shot
-        # demonstrations are loaded from sample['_shots'] for assembly/evaluation
-        # but must remain intact — only data-section operators are applicable.
-        if compress_field != self.config.prompt_field:
-            s_classes = []
 
         # Build sections from the dataset using PromptSplitter.
         splitter = PromptSplitter(
