@@ -81,6 +81,8 @@ class CompressorRunner:
                 result.save(out_path)
                 logger.info("Saved result → %s", out_path)
                 results.append(result)
+            except NotImplementedError as exc:
+                logger.warning("Skipping run %s — %s", run_cfg.run_name, exc)
             except Exception:
                 logger.exception("Run %s failed", run_cfg.run_name)
                 raise
@@ -492,8 +494,23 @@ class CompressorRunner:
             _load_task,
         )
 
+        from prompt_piper.backends.lm_eval import _is_chat_model
+
         model = self._get_model()
         task = _load_task(run_cfg.task, num_fewshot=run_cfg.num_fewshot)
+
+        # Raise early when a loglikelihood task is paired with a chat API model
+        # (OpenAI, Gemini, …) — these APIs do not expose prompt log-probs.
+        if _is_chat_model(model):
+            first_task = next(iter(task.values())) if isinstance(task, dict) else task
+            output_type = getattr(first_task, "OUTPUT_TYPE", "generate_until")
+            if output_type in ("multiple_choice", "loglikelihood"):
+                raise NotImplementedError(
+                    f"Task {run_cfg.task!r} uses output_type={output_type!r}, "
+                    f"which requires loglikelihood — not supported by chat API "
+                    f"models. Remove this run from the config or use an HF model."
+                )
+
         evaluator = LMEvalEvaluator(
             model, task,
             generation_kwargs=run_cfg.generation_kwargs,

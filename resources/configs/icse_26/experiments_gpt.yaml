@@ -127,7 +127,5 @@ runs:
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: nsga2
 
-  # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
-  - name: musr_murder_mysteries_nsga2
-    task: leaderboard_musr_murder_mysteries
-    algorithm: nsga2
+  # MuSR (leaderboard_musr_murder_mysteries) is a loglikelihood task and is not
+  # supported by chat API models — omitted for GPT.
