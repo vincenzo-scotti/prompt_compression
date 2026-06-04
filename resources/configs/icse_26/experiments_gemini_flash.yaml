@@ -23,6 +23,9 @@ model:
   kwargs:
     # Gemini supports concurrent requests; 4 is a safe default for Flash.
     num_concurrent: 4
+    # Disable internal chain-of-thought to reduce latency. Sets thinking_budget=0
+    # on the OpenAI-compatible endpoint; max_tokens then reflects visible output only.
+    disable_thinking: true
 
 output:
   dir: ./results/icse_26/gemini-3-flash-preview
@@ -39,8 +42,8 @@ defaults:
   n_search: 50
   n_test: 50
   algorithm: nsga2
-  pop_size: 50
-  n_gen: 10
+  pop_size: 20
+  n_gen: 15
 
   seed: 42
   subset_seed: 42
