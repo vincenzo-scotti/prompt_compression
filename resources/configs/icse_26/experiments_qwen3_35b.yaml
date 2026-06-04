@@ -52,8 +52,8 @@ defaults:
   n_search: 50
   n_test: 50
   algorithm: nsga2
-  pop_size: 50
-  n_gen: 10
+  pop_size: 20
+  n_gen: 15
 
   seed: 42
   subset_seed: 42

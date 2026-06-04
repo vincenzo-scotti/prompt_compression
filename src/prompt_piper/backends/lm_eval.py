@@ -132,7 +132,9 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         )
 
         class _GeminiChatCompletion(OpenAIChatCompletion):
-            def __init__(self, base_url=_GEMINI_BASE_URL, **kw):
+            def __init__(self, base_url=_GEMINI_BASE_URL,
+                         disable_thinking: bool = False, **kw):
+                self._disable_thinking = disable_thinking
                 super().__init__(base_url=base_url, **kw)
 
             @property
@@ -160,12 +162,15 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                 # until max_tokens without explicit stop sequences.
                 if "stop" in payload and not payload["stop"]:
                     payload.pop("stop", None)
-                # Gemini Flash 3+ is a thinking model: max_tokens covers both
-                # internal chain-of-thought (~1000-1500 tokens) AND visible output.
-                # The thinking_config parameter is not supported on the OpenAI-
-                # compatible endpoint, so we raise the budget instead to ensure
-                # the model has enough tokens for a complete visible response.
-                if "max_tokens" in payload:
+                if self._disable_thinking:
+                    # Disable Gemini's internal chain-of-thought to reduce latency.
+                    # thinking_budget=0 turns off thinking on the OpenAI-compatible
+                    # endpoint; max_tokens can then reflect visible output only.
+                    payload["thinking_config"] = {"thinking_budget": 0}
+                elif "max_tokens" in payload:
+                    # Thinking model: max_tokens covers both internal CoT tokens
+                    # (~1000-1500) and visible output — raise the budget so the
+                    # model has enough room for a complete response.
                     payload["max_tokens"] = max(payload["max_tokens"], 4096)
                 return payload
 
@@ -1058,11 +1063,19 @@ i      ``process_results`` metric.
         if tokenizer is None or not hasattr(tokenizer, "apply_chat_template"):
             return prompt
         try:
-            return tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt}],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            try:
+                return tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+            except TypeError:
+                return tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
         except Exception as exc:
             logger.warning(
                 "LMEvalEvaluator: chat template failed (%s); using raw prompt.", exc
