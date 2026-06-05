@@ -112,7 +112,7 @@ runs:
     task: mbpp_instruct
     algorithm: nsga2
 
-a  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
+ # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
   - name: mmlu_pro_cs_nsga2
     task: mmlu_pro_computer_science
     algorithm: nsga2
