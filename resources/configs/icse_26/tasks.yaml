@@ -44,6 +44,7 @@ tasks:
     compress_field: prompt_0shot
     search_split: test
     test_split: test
+    n_search: 15
     generation_kwargs:
       max_gen_toks: 512
     instruction_prefix: |
