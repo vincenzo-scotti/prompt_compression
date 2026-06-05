@@ -162,16 +162,18 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                 # until max_tokens without explicit stop sequences.
                 if "stop" in payload and not payload["stop"]:
                     payload.pop("stop", None)
-                if self._disable_thinking:
-                    # Disable Gemini's internal chain-of-thought to reduce latency.
-                    # thinking_budget=0 turns off thinking on the OpenAI-compatible
-                    # endpoint; max_tokens can then reflect visible output only.
-                    payload["thinking_config"] = {"thinking_budget": 0}
-                elif "max_tokens" in payload:
-                    # Thinking model: max_tokens covers both internal CoT tokens
-                    # (~1000-1500) and visible output — raise the budget so the
-                    # model has enough room for a complete response.
+                if "max_tokens" in payload:
+                    # For thinking-capable Gemini models, max_tokens covers both
+                    # internal CoT tokens (~1000-1500) and visible output.
+                    # Raise the budget so the model has enough room for a
+                    # complete response even when thinking is active.
                     payload["max_tokens"] = max(payload["max_tokens"], 4096)
+                logger.debug(
+                    "Gemini payload keys=%r max_tokens=%r stop=%r",
+                    [k for k in payload if k != "messages"],
+                    payload.get("max_tokens"),
+                    payload.get("stop"),
+                )
                 return payload
 
         return _GeminiChatCompletion(model=model_name, **kwargs)
