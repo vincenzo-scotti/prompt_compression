@@ -10,10 +10,8 @@
 # reverts any operator that expands or empties the text, so operators can only
 # compress or be neutral, never expand.
 #
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs,
-# instruction_prefix) are defined in tasks.yaml and merged automatically.
-# instruction_prefix injects a verbose realistic system prompt into each sample
-# as `verbose_instruction`, giving compression operators richer material.
+# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
+# are defined in tasks.yaml and merged automatically.
 #
 # Tasks (5 benchmarks):
 #   mbpp_instruct                                  — code gen, pass@1, 3-shot
@@ -105,8 +103,8 @@ transferability:
 runs:
 
   # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
-  # Task settings (num_fewshot, compress_field, generation_kwargs,
-  # instruction_prefix) come from tasks.yaml.
+  # Task settings (num_fewshot, compress_field, generation_kwargs)
+  # come from tasks.yaml.
   # Requires: HF_ALLOW_CODE_EVAL=1
   - name: mbpp_instruct_nsga2
     task: mbpp_instruct

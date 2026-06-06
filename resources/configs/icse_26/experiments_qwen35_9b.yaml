@@ -8,8 +8,7 @@
 # a separate (user, assistant) turn — the recommended setup for chat-tuned models.
 # Stop sequence: Qwen3 uses <|im_end|> as end-of-turn token.
 #
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs,
-# instruction_prefix) are defined in tasks.yaml and merged automatically.
+# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
 #
 # Tasks (5 benchmarks — identical to other model configs):
 #   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,

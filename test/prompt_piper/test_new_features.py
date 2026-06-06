@@ -280,3 +280,139 @@ class TestTransferabilityEval:
         )
         d = te.to_dict()
         json.dumps(d)  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Level-aware search encoding
+# ---------------------------------------------------------------------------
+
+def _make_structured_dataset(n: int = 8) -> list[dict]:
+    """Dataset with a shared instruction prefix so sections can be non-empty."""
+    return [
+        {
+            "prompt": f"Classify sentiment.\n\nText {i}: This is sample {i}.",
+            "target": "positive" if i % 2 == 0 else "negative",
+        }
+        for i in range(n)
+    ]
+
+
+class TestLevelAwareSearch:
+
+    def test_n_var_is_three_times_n_ops_with_data(self):
+        """With level-aware encoding + compress_input_data, bits = [N instr | N shots | N data]."""
+        dataset = _make_structured_dataset()
+        cfg = ExperimentConfig(
+            n_subset=len(dataset),
+            transformation_ids=["O1", "O2", "O3"],
+            compress_input_data=True,
+            pop_size=2, n_gen=1, seed=42,
+        )
+        exp = Experiment(config=cfg, dataset=dataset, evaluator=MockEvaluator())
+        N = len(exp._search_transform_classes)
+        problem = exp._build_problem(dataset)
+        assert problem.n_var == 3 * N
+
+    def test_n_var_is_two_times_n_ops_without_data(self):
+        """With compress_input_data=False, bits = [N instr | N shots]."""
+        dataset = _make_structured_dataset()
+        cfg = ExperimentConfig(
+            n_subset=len(dataset),
+            transformation_ids=["O1", "O2", "O3"],
+            compress_input_data=False,
+            pop_size=2, n_gen=1, seed=42,
+        )
+        exp = Experiment(config=cfg, dataset=dataset, evaluator=MockEvaluator())
+        N = len(exp._search_transform_classes)
+        problem = exp._build_problem(dataset)
+        assert problem.n_var == 2 * N
+
+    def test_names_from_bits_include_level_prefix(self):
+        """names_from_bits returns 'I:X', 'S:X', 'D:X' level-prefixed names."""
+        dataset = _make_structured_dataset()
+        cfg = ExperimentConfig(
+            n_subset=len(dataset),
+            transformation_ids=["O1", "O2"],
+            compress_input_data=True,
+            pop_size=2, n_gen=1, seed=42,
+        )
+        exp = Experiment(config=cfg, dataset=dataset, evaluator=MockEvaluator())
+        N = len(exp._search_transform_classes)
+        problem = exp._build_problem(dataset)
+        all_on = np.ones(3 * N, dtype=int)
+        names = problem.names_from_bits(all_on)
+        assert any(n.startswith("I:") for n in names)
+        assert any(n.startswith("S:") for n in names)
+        assert any(n.startswith("D:") for n in names)
+
+    def test_experiment_run_returns_correct_solution_width(self):
+        """End-to-end run: pareto_solutions columns == 3 × N search ops."""
+        dataset = _make_structured_dataset(n=10)
+        cfg = ExperimentConfig(
+            n_subset=8,
+            transformation_ids=["O1", "O2", "O3"],
+            compress_input_data=True,
+            pop_size=4, n_gen=2, seed=42,
+        )
+        exp = Experiment(config=cfg, dataset=dataset, evaluator=MockEvaluator())
+        result = exp.run()
+        N = len(exp._search_transform_classes)
+        assert result.pareto_solutions.shape[1] == 3 * N
+
+    def test_evaluate_solutions_accepts_level_aware_bits(self):
+        """evaluate_solutions must work with 3×N bit vectors on held-out data."""
+        dataset = _make_structured_dataset(n=10)
+        cfg = ExperimentConfig(
+            n_subset=8,
+            transformation_ids=["O1", "O2"],
+            compress_input_data=True,
+            pop_size=4, n_gen=2, seed=42,
+        )
+        exp = Experiment(config=cfg, dataset=dataset, evaluator=MockEvaluator())
+        N = len(exp._search_transform_classes)
+        dummy_solutions = np.zeros((3, 3 * N), dtype=int)
+        objectives = exp.evaluate_solutions(dummy_solutions, dataset)
+        assert objectives.shape == (3, 2)
+
+
+# ---------------------------------------------------------------------------
+# _bits_to_ids helper
+# ---------------------------------------------------------------------------
+
+class TestBitsToIds:
+
+    def test_three_level_encoding(self):
+        from prompt_piper.tools.compressor.runner import _bits_to_ids
+        from prompt_piper.transformations import ALL_TRANSFORMATIONS
+
+        classes = ALL_TRANSFORMATIONS[:3]  # O1, O2, O3
+        # instr: O1=1, O2=0, O3=0 | shots: O1=0, O2=1, O3=0 | data: O1=0, O2=0, O3=1
+        bits = [1, 0, 0,  0, 1, 0,  0, 0, 1]
+        ids = _bits_to_ids(classes, bits)
+        assert "O1@instruction" in ids
+        assert "O2@shots" in ids
+        assert "O3@data" in ids
+        assert len(ids) == 3
+
+    def test_two_level_encoding(self):
+        from prompt_piper.tools.compressor.runner import _bits_to_ids
+        from prompt_piper.transformations import ALL_TRANSFORMATIONS
+
+        classes = ALL_TRANSFORMATIONS[:2]  # O1, O2
+        bits = [1, 0,  0, 1]  # O1@instruction, O2@shots
+        ids = _bits_to_ids(classes, bits)
+        assert "O1@instruction" in ids
+        assert "O2@shots" in ids
+        assert len(ids) == 2
+
+    def test_all_zeros_returns_empty(self):
+        from prompt_piper.tools.compressor.runner import _bits_to_ids
+        from prompt_piper.transformations import ALL_TRANSFORMATIONS
+
+        classes = ALL_TRANSFORMATIONS[:3]
+        ids = _bits_to_ids(classes, [0, 0, 0, 0, 0, 0, 0, 0, 0])
+        assert ids == []
+
+    def test_empty_classes_returns_empty(self):
+        from prompt_piper.tools.compressor.runner import _bits_to_ids
+        assert _bits_to_ids([], []) == []
