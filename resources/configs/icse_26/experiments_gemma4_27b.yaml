@@ -9,8 +9,7 @@
 # separate (user, assistant) turns — the recommended setup for chat models.
 # Stop sequence: Gemma uses <end_of_turn> as end-of-turn token.
 #
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs,
-# instruction_prefix) are defined in tasks.yaml and merged automatically.
+# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
 #
 # Tasks (5 benchmarks — identical to GPT config):
 #   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,

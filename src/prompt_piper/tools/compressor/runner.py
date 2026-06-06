@@ -20,6 +20,26 @@ from .results import BaselineEval, CompressorResult, SolutionEval, Transferabili
 
 logger = logging.getLogger(__name__)
 
+_LEVEL_LABELS = ["@instruction", "@shots", "@data"]
+
+
+def _bits_to_ids(transform_classes, bits) -> list[str]:
+    """Map a level-aware bit vector to operator IDs like ``"O3@instruction"``.
+
+    The bit vector layout is ``[N instruction | N shots | N data]`` where N is
+    ``len(transform_classes)``.  Extra levels beyond three are ignored.
+    """
+    n = len(transform_classes)
+    if n == 0:
+        return []
+    n_levels = len(bits) // n
+    ids: list[str] = []
+    for lvl, label in zip(range(n_levels), _LEVEL_LABELS):
+        for cls, b in zip(transform_classes, bits[lvl * n: (lvl + 1) * n]):
+            if b:
+                ids.append(f"{cls.id}{label}")
+    return ids
+
 
 class CompressorRunner:
     """Load the model once; iterate over runs defined in *config*.
@@ -201,9 +221,7 @@ class CompressorRunner:
         for i, (bits, names) in enumerate(
             zip(exp_result.pareto_solutions, exp_result.pareto_transformation_names)
         ):
-            ids = [
-                T.id for T, b in zip(transform_classes, bits) if b
-            ]
+            ids = _bits_to_ids(transform_classes, bits)
             pareto_evals.append(
                 SolutionEval(
                     transformation_ids=ids,

@@ -4,8 +4,8 @@
 # The Gemini backend handles chat formatting internally; apply_chat_template
 # and fewshot_as_multiturn must be false (same pattern as OpenAI chat models).
 #
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs,
-# instruction_prefix) are defined in tasks.yaml and merged automatically.
+# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
+# are defined in tasks.yaml and merged automatically.
 #
 # Tasks (5 benchmarks — identical to GPT config):
 #   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,

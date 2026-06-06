@@ -10,12 +10,7 @@ from typing import Any
 import numpy as np
 from pymoo.optimize import minimize
 
-from prompt_piper.transformations import (
-    ALL_TRANSFORMATIONS,
-    DATA_OPS,
-    INSTRUCTION_OPS,
-    SHOT_OPS,
-)
+from prompt_piper.transformations import ALL_TRANSFORMATIONS
 from prompt_piper.transformations.base import Transformation
 from prompt_piper.transformations.sections import PromptSplitter
 
@@ -457,18 +452,18 @@ class Experiment:
     ]:
         """Return (instruction_classes, shot_classes, data_classes) for *all_classes*.
 
-        Filters each scope list to the intersection with *all_classes* — the
-        caller is responsible for pre-filtering *all_classes* to the desired
-        operator pool (search-only or full).
+        Level-aware: the same operator pool is used for every section so that
+        each operator gets independent bits per level
+        ``[N instruction | N shots | N data]``.  The optimizer discovers which
+        (operator, level) combinations reduce tokens while preserving accuracy,
+        rather than being hard-constrained by pre-assigned operator scopes.
+
+        ``compress_input_data=False`` omits the data level entirely, keeping
+        the per-sample input section unchanged and reducing the search space.
         """
-        allowed = set(all_classes)
-
-        def _filter(scope_pool: list[type[Transformation]]) -> list[type[Transformation]]:
-            return [cls for cls in scope_pool if cls in allowed]
-
-        i_classes = _filter(INSTRUCTION_OPS)
-        s_classes = _filter(SHOT_OPS)
-        d_classes = _filter(DATA_OPS) if self.config.compress_input_data else []
+        i_classes = list(all_classes)
+        s_classes = list(all_classes)
+        d_classes = list(all_classes) if self.config.compress_input_data else []
         return i_classes, s_classes, d_classes
 
     def _sample_subset(self) -> list[dict]:

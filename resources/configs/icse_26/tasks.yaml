@@ -11,13 +11,27 @@
 #
 # Keys must match RunConfig fields exactly.
 #
-# instruction_prefix:
-#   A verbose, realistic system prompt prepended to the compress_field text.
-#   The combined text is stored as `verbose_instruction` in each dataset sample
-#   and becomes the compression target. This gives the compression operators
-#   richer material than the minimal benchmark-style prompts that lm-eval
-#   produces. After compression, only the compressed `verbose_instruction` is
-#   used; the full prompt with few-shot examples is reconstructed around it.
+# compress_field / instruction_prefix / _shots interaction:
+#
+#   Setting compress_field to anything other than prompt_field (here: "prompt_0shot")
+#   causes the backend to generate both a `prompt_0shot` field (0-shot template) and
+#   a `_shots` field (the plain-text few-shot block that precedes the 0-shot portion
+#   in the full formatted prompt).  PromptSplitter reads `_shots` directly, giving it
+#   explicit structural knowledge of where the few-shot demonstrations are.
+#
+#   instruction_prefix adds a verbose realistic system prompt that is prepended to
+#   prompt_0shot, creating a `verbose_instruction` field. This field becomes the
+#   effective compression target and provides clearer structure:
+#     instruction  = verbose task description (from instruction_prefix)
+#     shots        = few-shot examples        (from `_shots`)
+#     input_data   = per-sample 0-shot prompt (from prompt_0shot)
+#
+#   With the level-aware search, ALL operators get independent bits for each of
+#   these three levels, so the optimizer can discover which operator-level
+#   combinations reduce tokens while preserving accuracy.
+#
+#   Setting compress_field: null would disable `_shots` generation, leaving the
+#   shots section empty and wasting the S: operator bits entirely.
 #
 #   CRITICAL — output format must match lm-eval's extraction regex exactly:
 #     gsm8k_cot        → "The answer is N."        (regex: The answer is [-0-9.,]+.)
@@ -63,7 +77,7 @@ tasks:
   # ══════════════════════════════════════════════════════════════ MMLU-Pro ════
   # mmlu_pro_computer_science: multiple-choice CS knowledge with CoT, 5-shot.
   # compress_field=prompt_0shot: compress question + answer choices (instruction
-  # section); shot operators also compress the CoT demonstrations.
+  # section); shot operators also compress the 5 CoT demonstrations.
   #
   # lm-eval extraction regex: answer is \(?([ABCDEFGHIJ])\)?
   # Few-shot CoT examples end with: "The answer is (X)."
@@ -156,7 +170,9 @@ tasks:
   # scores the log-probability of each answer choice string. There is no
   # extraction regex and no output format to specify. Setting instruction_prefix
   # here would inject a verbose_instruction field but the model never reads it
-  # for generation. compress_field=null compresses the full prompt directly.
+  # for generation. compress_field=null compresses the full prompt directly;
+  # since this is 0-shot there are no few-shot examples and no _shots field is
+  # needed.
   leaderboard_musr_murder_mysteries:
     num_fewshot: 0
     compress_field: null
