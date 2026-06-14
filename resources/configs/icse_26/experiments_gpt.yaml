@@ -1,9 +1,9 @@
-# ICSE'26 — Full Benchmark Suite — gpt-5.4-mini-2026-03-17 (OpenAI Chat API)
+# ICSE'26 — Full Benchmark Suite — gpt-5.4-nano-2026-03-17 (OpenAI Chat API)
 #
 # model_type: openai-chat  (NOT openai-chat-completions)
 # The openai-chat type calls LocalChatCompletion._create_payload directly,
 # bypassing the lm-eval o-series heuristic that checks "5" in model_name.
-# Without this, gpt-5.4-mini-2026-03-17 would have stop sequences stripped
+# Without this, gpt-5.4-nano-2026-03-17 would have stop sequences stripped
 # and temperature forced to 1.
 #
 # Semantic operators (O23–O28): a universal guardrail in Transformation.__call__
@@ -27,15 +27,15 @@ task_library: ./tasks.yaml
 
 model:
   type: openai-chat
-  name: gpt-5.4-mini-2026-03-17
+  name: gpt-5.4-nano-2026-03-17
   kwargs:
-    # gpt-5.4-mini does not support the 'stop' parameter.
+    # gpt-5.4-nano does not support the 'stop' parameter.
     drop_stop_sequences: true
     # Run four API requests in parallel to reduce wall-clock time.
     num_concurrent: 4
 
 output:
-  dir: ./results/icse_26/gpt-5.4-mini-2026-03-17
+  dir: ./results/icse_26/gpt-5.4-nano-2026-03-17
   overwrite: false
 
 defaults:
