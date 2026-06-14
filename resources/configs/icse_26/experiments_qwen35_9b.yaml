@@ -127,8 +127,3 @@ runs:
   - name: bbh_logical_deduction_nsga2
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: nsga2
-
-  # ═══════════════════════════════════════════════ MuSR – Murder Mysteries ════
-  - name: musr_murder_mysteries_nsga2
-    task: leaderboard_musr_murder_mysteries
-    algorithm: nsga2

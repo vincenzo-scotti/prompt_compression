@@ -161,20 +161,3 @@ tasks:
       - End your response with "So the answer is (X)." where X is the letter
         of the correct option from the list (e.g. (A), (B), (C)). Use this
         exact format — lowercase 'the', letter in parentheses.
-
-  # ══════════════════════════════════════════════════ MuSR Murder Mysteries ════
-  # leaderboard_musr_murder_mysteries: multi-step soft reasoning, acc_norm,
-  # output_type=multiple_choice (loglikelihood over answer choices), 0-shot.
-  #
-  # This is a LOGLIKELIHOOD task — the model does NOT generate text. lm-eval
-  # scores the log-probability of each answer choice string. There is no
-  # extraction regex and no output format to specify. Setting instruction_prefix
-  # here would inject a verbose_instruction field but the model never reads it
-  # for generation. compress_field=null compresses the full prompt directly;
-  # since this is 0-shot there are no few-shot examples and no _shots field is
-  # needed.
-  leaderboard_musr_murder_mysteries:
-    num_fewshot: 0
-    compress_field: null
-    search_split: test
-    test_split: test
