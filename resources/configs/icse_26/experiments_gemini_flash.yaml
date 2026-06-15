@@ -115,4 +115,3 @@ runs:
   - name: bbh_logical_deduction_nsga2
     task: bbh_cot_fewshot_logical_deduction_seven_objects
     algorithm: nsga2
-.
