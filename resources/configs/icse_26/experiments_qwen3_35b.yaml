@@ -24,7 +24,7 @@ model:
   type: hf
   name: Qwen/Qwen3.6-35B-A3B
   kwargs:
-    batch_size: 4
+    batch_size: auto        # adaptive: avoids OOM on long MBPP code prompts
     max_length: 8192        # Qwen3 supports up to 128 K; cap for eval speed
     device_map: auto
     dtype: bfloat16
