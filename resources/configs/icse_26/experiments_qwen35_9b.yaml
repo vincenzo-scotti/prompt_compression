@@ -30,6 +30,8 @@ model:
     device_map: auto
     dtype: bfloat16
     trust_remote_code: true
+  generation_kwargs:
+    enable_thinking: false  # Qwen3 thinking is on by default; disable for eval speed
   quantization:
     load_in_4bit: true
     bnb_4bit_quant_type: nf4
