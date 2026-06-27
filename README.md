@@ -201,7 +201,7 @@ LLM-backed fitters (pass `backend=` to the constructor): O4, O10, O15, O28.
 ### Boundary detection
 
 When compressing full prompts that include few-shot demonstrations, the fitter needs to know where the fixed few-shot block ends and the per-sample question begins, so that operators like `ContextPruning` (O17) do not prune the demonstration paragraphs.
-
+Run statistical tests
 `DatasetVocabularyFitter.fit_boundary()` detects this boundary automatically via the **longest common prefix** (LCP) across all corpus texts:
 
 ```python
@@ -264,14 +264,3 @@ Both scripts load `.env` automatically, are restartable (completed runs are skip
 - `notebooks/example_llm.ipynb` — full pipeline with an lm-eval task and HF model
 - `notebooks/example_llm_complex.ipynb` — multi-run scenario with fitting, few-shot compression, and baselines
 - `notebooks/example_chatgpt.ipynb` — same pipeline using ChatGPT via the OpenAI chat-completions API
-
-## TODOs
-
-- [ ] Filter correctly operators in results (and in other parts).
-  - Filter is used only upon application of transformations in search and eval.
-  - Results contain operators that should not be there.
-  - Make sure to fix also mapping from transformation names to transformation IDs
-- [ ] Add support for DeepSeek
-  - Already started, it is in the dev branch
-- [ ] Create detailed experiment logs already during search
-  - Increase detail at sample level and store fitted information
