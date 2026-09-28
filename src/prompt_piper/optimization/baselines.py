@@ -15,8 +15,9 @@ Eight baselines are provided:
   when the problem was built with ``use_llm_for_semantic=True`` these operators
   use the LLM backend, otherwise they fall back to heuristics.
 * :class:`MultiArmedBanditBaseline` — Thompson Sampling bandit over the
-  binary operator space; uses task performance as the reward signal and
-  returns the Pareto-non-dominated subset of all visited solutions.
+  binary operator space; uses a weighted sum of task performance and
+  compression as the reward signal and returns the Pareto-non-dominated
+  subset of all visited solutions.
 * :class:`LLMLingua2Baseline` — token-level compression via the LLMLingua-2
   model (requires the ``llmlingua`` package).
 """
@@ -76,6 +77,33 @@ def _pareto_front(solutions: np.ndarray, objectives: np.ndarray):
         if not _is_dominated(f, others):
             keep.append(i)
     return solutions[keep], objectives[keep]
+
+
+def _log_running_front(problem, method: str, step: int, solutions: np.ndarray, objectives: np.ndarray) -> None:
+    """Log the Pareto front of everything visited so far (search objectives).
+
+    Called after every evaluation by the iterative baselines so that the
+    front at any intermediate step is available without reconstruction.
+    """
+    log_state = getattr(problem, "log_state", None)
+    if log_state is None:
+        return
+    obj = objectives.copy()
+    obj[:, 1] = -obj[:, 1]  # minimise tokens and -performance
+    front_sol, front_obj = _pareto_front(solutions, obj)
+    log_state("front", {
+        "algorithm": method,
+        "step": step,
+        "n_visited": len(solutions),
+        "pareto_front": [
+            {
+                "bits": [int(b) for b in bits],
+                "avg_tokens": float(f[0]),
+                "avg_performance": float(-f[1]),
+            }
+            for bits, f in zip(front_sol, front_obj)
+        ],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +201,7 @@ class RandomSearchBaseline:
             avg_tokens, avg_perf = problem.score_solution(bits)
             all_solutions[i] = bits
             all_objectives[i] = [avg_tokens, avg_perf]
+            _log_running_front(problem, self.name, i + 1, all_solutions[: i + 1], all_objectives[: i + 1])
 
         # Return only the Pareto-non-dominated subset.
         # For the Pareto filter we want to *minimise* tokens and *maximise*
@@ -295,9 +324,16 @@ class MultiArmedBanditBaseline:
 
     Each of the ``n_var`` operators is treated as an independent Bernoulli arm
     with a Beta(α, β) prior.  At every round the arm beliefs are sampled, a
-    binary vector is constructed by thresholding at 0.5, and the observed task
-    performance is used to update the beliefs of all *active* arms (those
-    where the corresponding bit is 1).
+    binary vector is constructed by thresholding at 0.5, and a scalarized
+    reward is used to update the beliefs of all *active* arms (those where the
+    corresponding bit is 1)::
+
+        reward = w · performance + (1 − w) · compression
+        compression = clip(1 − avg_tokens / reference_tokens, 0, 1)
+
+    where ``reference_tokens`` is the average token count of the uncompressed
+    prompts.  Both terms lie in [0, 1], so the reward does too.  ``w = 1``
+    recovers the performance-only reward.
 
     The total evaluation budget matches the evolutionary run:
     ``n_evaluations = pop_size × n_gen``.
@@ -305,6 +341,11 @@ class MultiArmedBanditBaseline:
     After the budget is exhausted the Pareto-non-dominated subset of all
     visited (solution, objective) pairs is returned — the same post-processing
     used by :class:`RandomSearchBaseline`.
+
+    Every round is logged as a ``mab_round`` state (when the problem is
+    recording) with the sampled θ, the reward components and the Beta
+    parameters before and after the update, so the evolution of the beliefs
+    can be reconstructed (see :func:`prompt_piper.analysis.mab_trajectory`).
 
     Parameters
     ----------
@@ -316,6 +357,9 @@ class MultiArmedBanditBaseline:
         Initial α parameter of the Beta prior (default 1 → uniform).
     beta_init:
         Initial β parameter of the Beta prior (default 1 → uniform).
+    reward_weight:
+        Weight ``w`` of performance in the reward (default 0.5); the remaining
+        ``1 − w`` goes to compression.
     """
 
     name = "multi_armed_bandit"
@@ -326,11 +370,15 @@ class MultiArmedBanditBaseline:
         seed: int = 42,
         alpha_init: float = 1.0,
         beta_init: float = 1.0,
+        reward_weight: float = 0.5,
     ) -> None:
+        if not 0.0 <= reward_weight <= 1.0:
+            raise ValueError(f"reward_weight must be in [0, 1], got {reward_weight}")
         self._n_eval = n_evaluations
         self._seed = seed
         self._alpha_init = alpha_init
         self._beta_init = beta_init
+        self._reward_weight = reward_weight
 
     @property
     def config(self) -> dict:
@@ -339,11 +387,20 @@ class MultiArmedBanditBaseline:
             "seed": self._seed,
             "alpha_init": self._alpha_init,
             "beta_init": self._beta_init,
+            "reward_weight": self._reward_weight,
         }
+
+    def reward(self, avg_tokens: float, avg_perf: float, reference_tokens: float) -> tuple[float, float]:
+        """Return ``(reward, compression)`` for one evaluated solution."""
+        compression = 1.0 - avg_tokens / reference_tokens if reference_tokens > 0 else 0.0
+        compression = min(max(compression, 0.0), 1.0)
+        w = self._reward_weight
+        return w * avg_perf + (1.0 - w) * compression, compression
 
     def run(self, problem: PromptCompressionProblem) -> BaselineResult:
         rng = np.random.default_rng(self._seed)
         n_var = problem.n_var
+        reference_tokens = problem.reference_tokens()
 
         alpha = np.full(n_var, self._alpha_init, dtype=float)
         beta_ = np.full(n_var, self._beta_init, dtype=float)
@@ -359,12 +416,34 @@ class MultiArmedBanditBaseline:
             avg_tokens, avg_perf = problem.score_solution(bits)
             all_solutions[i] = bits
             all_objectives[i] = [avg_tokens, avg_perf]
+            _log_running_front(problem, self.name, i + 1, all_solutions[: i + 1], all_objectives[: i + 1])
 
-            # Update beliefs for active arms only: performance is in [0, 1]
-            # by the Evaluator contract, so it directly serves as a reward.
+            # Update beliefs for active arms only with the scalarized reward
+            # (in [0, 1], so it serves as a fractional Bernoulli outcome).
+            reward, compression = self.reward(avg_tokens, avg_perf, reference_tokens)
+            alpha_before, beta_before = alpha.copy(), beta_.copy()
             active = bits.astype(bool)
-            alpha[active] += avg_perf
-            beta_[active] += (1.0 - avg_perf)
+            alpha[active] += reward
+            beta_[active] += (1.0 - reward)
+
+            log_state = getattr(problem, "log_state", None)
+            if log_state is not None:
+                log_state("mab_round", {
+                    "round": i + 1,
+                    "theta": theta.tolist(),
+                    "bits": bits.tolist(),
+                    "reward": reward,
+                    "reward_weight": self._reward_weight,
+                    "avg_performance": avg_perf,
+                    "avg_tokens": avg_tokens,
+                    "reference_tokens": reference_tokens,
+                    "compression": compression,
+                    "alpha_before": alpha_before.tolist(),
+                    "beta_before": beta_before.tolist(),
+                    "alpha_after": alpha.tolist(),
+                    "beta_after": beta_.tolist(),
+                    "posterior_mean": (alpha / (alpha + beta_)).tolist(),
+                })
 
         # Extract Pareto-non-dominated front (minimise tokens, maximise perf).
         obj_for_pareto = all_objectives.copy()

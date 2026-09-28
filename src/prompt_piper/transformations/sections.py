@@ -30,6 +30,12 @@ class PromptSections:
     shots: str = ""
     input_data: str = ""
     output_cue: str = ""
+    #: Separators reproducing the original prompt exactly (default ``"\n\n"``).
+    sep_after_instruction: str = "\n\n"
+    sep_after_shots: str = "\n\n"
+    sep_before_cue: str = "\n\n"
+    #: Text appended after everything (e.g. lm-eval's ``gen_prefix``); never compressed.
+    tail: str = ""
 
     def assemble(
         self,
@@ -40,15 +46,39 @@ class PromptSections:
         """Rebuild the prompt from (optionally overridden) section texts.
 
         Pass compressed section text to replace the original.  ``None`` means
-        keep the stored value.  ``output_cue`` is always appended as-is.
+        keep the stored value.  ``output_cue`` and ``tail`` are always appended
+        as-is.  Empty sections are skipped together with their separator.
         """
         parts = [
-            instruction if instruction is not None else self.instruction,
-            shots if shots is not None else self.shots,
-            input_data if input_data is not None else self.input_data,
-            self.output_cue,
+            ("instruction", instruction if instruction is not None else self.instruction),
+            ("shots", shots if shots is not None else self.shots),
+            ("data", input_data if input_data is not None else self.input_data),
+            ("cue", self.output_cue),
         ]
-        return "\n\n".join(p for p in parts if p)
+        after = {"instruction": self.sep_after_instruction, "shots": self.sep_after_shots}
+        out, prev = "", None
+        for kind, text in parts:
+            if not text:
+                continue
+            if prev is not None:
+                out += self.sep_before_cue if (prev == "data" and kind == "cue") else after.get(prev, "\n\n")
+            out += text
+            prev = kind
+        return out + self.tail
+
+    def body(self) -> str:
+        """Instruction + shots + data (with their separators), without cue and tail."""
+        return PromptSections(
+            instruction=self.instruction, shots=self.shots, input_data=self.input_data,
+            sep_after_instruction=self.sep_after_instruction, sep_after_shots=self.sep_after_shots,
+        ).assemble()
+
+    def with_cue(self, body: str) -> str:
+        """Append the (never compressed) answer cue and tail to *body*."""
+        out = body
+        if self.output_cue:
+            out += (self.sep_before_cue if out else "") + self.output_cue
+        return out + self.tail
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +200,39 @@ class PromptSplitter:
     # Per-sample splitting
     # ------------------------------------------------------------------
 
+    def _explicit_cue(self) -> str:
+        """Exact answer cue shared by every sample's ``_input_text`` (may be ``""``)."""
+        if not hasattr(self, "_cue_cache"):
+            inputs = [str(s.get("_input_text", "")) for s in self._samples]
+            lcs = self._lcs(inputs) if len(inputs) > 1 else ""
+            nl = lcs.find("\n")
+            cue = lcs[nl:].lstrip("\n") if nl != -1 and lcs != inputs[0] else ""
+            self._cue_cache = cue if cue.strip() else ""
+        return self._cue_cache
+
+    def _split_explicit(self, sample: dict, text: str) -> PromptSections:
+        """Split using the structure provided by the dataset (exact separators)."""
+        input_text = str(sample["_input_text"])
+        static = text[: len(text) - len(input_text)]
+        instruction = static.rstrip()
+        raw_shots = str(sample.get(self._shots_field, "") or "")
+        shots = raw_shots.strip()
+        cue = self._explicit_cue()
+        data = input_text[: len(input_text) - len(cue)] if cue else input_text
+        # Trailing whitespace separates data from the cue; without a cue it is
+        # part of the sample text and must be kept to reproduce the prompt.
+        data_stripped = data.rstrip() if cue else data
+        return PromptSections(
+            instruction=instruction,
+            shots=shots,
+            input_data=data_stripped,
+            output_cue=cue,
+            sep_after_instruction=static[len(instruction):] or "\n\n",
+            sep_after_shots=raw_shots[len(raw_shots.rstrip()):] or "\n\n",
+            sep_before_cue=data[len(data_stripped):] or ("\n\n" if cue else ""),
+            tail=str(sample.get("_tail", "") or ""),
+        )
+
     def split(self, sample: dict) -> PromptSections:
         """Split a single sample into its four sections.
 
@@ -178,6 +241,10 @@ class PromptSplitter:
         operators are applied to it.  This preserves backward-compatible behaviour.
         """
         text = str(sample.get(self._compress_field, ""))
+
+        # Exact path: the dataset provides the prompt structure.
+        if "_input_text" in sample and text.endswith(str(sample["_input_text"])):
+            return self._split_explicit(sample, text)
 
         # Fast path: no shared structure detected → treat entire text as instruction.
         if not self._instruction_prefix and not self._output_cue:
@@ -192,8 +259,8 @@ class PromptSplitter:
         inner = text
         if self._instruction_prefix and inner.startswith(self._instruction_prefix):
             inner = inner[len(self._instruction_prefix):].lstrip("\n")
-        if self._output_cue and inner.endswith(self._output_cue):
-            inner = inner[: -len(self._output_cue)].rstrip("\n")
+        if self._output_cue and inner.rstrip().endswith(self._output_cue):
+            inner = inner.rstrip()[: -len(self._output_cue)].rstrip("\n")
 
         # ------------------------------------------------------------------
         # Instruction section

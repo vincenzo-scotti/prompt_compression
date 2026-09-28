@@ -11,7 +11,9 @@ import numpy as np
 
 from prompt_piper.optimization.config import ExperimentConfig
 from prompt_piper.optimization.evaluator import MockEvaluator
-from prompt_piper.optimization.runner import Experiment
+from prompt_piper.optimization.bits import bits_to_ids
+from prompt_piper.optimization.recorder import RunRecorder
+from prompt_piper.optimization.runner import Experiment, sample_indices
 from prompt_piper.transformations import ALL_TRANSFORMATIONS
 
 from .callback import GenerationCallback
@@ -21,6 +23,17 @@ from .results import BaselineEval, CompressorResult, SolutionEval, Transferabili
 logger = logging.getLogger(__name__)
 
 _LEVEL_LABELS = ["@instruction", "@shots", "@data"]
+
+#: Baselines that transform text directly instead of selecting operator bits.
+_TEXT_BASELINES = frozenset({"truncated_prompt", "random_deletion", "llmlingua2"})
+
+
+def _unbit_text_baselines(name: str, solutions: list[dict]) -> list[dict]:
+    """Text-level baselines have no operator bits: store ``None`` instead of zeros."""
+    if name in _TEXT_BASELINES:
+        for sol in solutions:
+            sol.update(layout=None, bits=None, transformation_ids=None)
+    return solutions
 
 
 def _bits_to_ids(transform_classes, bits) -> list[str]:
@@ -119,21 +132,55 @@ class CompressorRunner:
         phase is skipped; only the requested baselines are evaluated.
         """
         timestamp = CompressorResult.now_timestamp()
+        recorder = self._open_recorder(run_cfg.run_name)
+        try:
+            return self._run_single_recorded(run_cfg, timestamp, recorder)
+        finally:
+            recorder.close()
 
+    def _run_single_recorded(self, run_cfg: RunConfig, timestamp: str, recorder) -> CompressorResult:
+        if run_cfg.fewshot_as_multiturn:
+            raise ValueError(
+                f"{run_cfg.run_name}: fewshot_as_multiturn=true is not supported. The few-shot "
+                "examples are a compressible text section; the assembled prompt is sent as a "
+                "single user turn (wrapped in the chat template when apply_chat_template=true)."
+            )
         backend = self._get_backend(run_cfg)
         transform_classes = self._resolve_transforms(run_cfg)
         transform_ids = [T.id for T in transform_classes]
         transform_names = [T.name for T in transform_classes]
+        semantic_backend = backend.get("semantic_backend")
+        if semantic_backend is not None:
+            semantic_backend.recorder = recorder
+
+        # ---- Data: search subset and a disjoint test subset -----------------
+        search_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.search_split)
+        test_full = self._get_dataset(backend, run_cfg, split=run_cfg.test_split)
+        search_idx, test_idx = self._split_indices(run_cfg, len(search_dataset), len(test_full))
+        test_dataset = [test_full[i] for i in test_idx]
+        recorder.update_meta(
+            run_name=run_cfg.run_name,
+            timestamp=timestamp,
+            config=self._serialise_config(run_cfg),
+            dry_run=self._dry_run,
+            generation_kwargs=getattr(backend.get("evaluator"), "_gen_kwargs", None),
+            transformation_ids=transform_ids,
+            source_splits={"search": run_cfg.search_split, "test": run_cfg.test_split},
+            source_split_sizes={"search": len(search_dataset), "test": len(test_full)},
+            same_source_split=run_cfg.search_split == run_cfg.test_split,
+            sample_ids={"search": search_idx, "test": test_idx},
+            disjoint=not (set(search_idx) & set(test_idx))
+            if run_cfg.search_split == run_cfg.test_split else True,
+        )
 
         # ---- Fitting phase (optional) ------------------------------------
-        search_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.search_split)
-        semantic_backend = backend.get("semantic_backend")
-
         if run_cfg.use_fitting:
             t_fit_start = time.perf_counter()
-            fitted, fitting_report = self._run_fitting(
-                run_cfg, search_dataset, semantic_backend
-            )
+            with recorder.phase("fitting", method="fitter"):
+                # Fit on the search sample S only: no test samples or targets.
+                fitted, fitting_report = self._run_fitting(
+                    run_cfg, [search_dataset[i] for i in search_idx], semantic_backend
+                )
             fitting_elapsed: float | None = time.perf_counter() - t_fit_start
             factory = self._compose_factory(fitted, semantic_backend)
         else:
@@ -149,15 +196,31 @@ class CompressorRunner:
             tokenizer=backend.get("tokenizer"),
             transformations=transform_classes,
             transformation_factory=factory,
+            recorder=recorder,
         )
 
-        # ---- Test dataset ------------------------------------------------
-        test_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.test_split)
-        if run_cfg.n_test is not None:
-            import random
-            rng = random.Random(run_cfg.subset_seed + 1)
-            if run_cfg.n_test < len(test_dataset):
-                test_dataset = rng.sample(test_dataset, run_cfg.n_test)
+        bit_layouts = {"search": exp.bit_layout(), "full": exp.bit_layout(full=True)}
+        seeds = self._seeds(run_cfg)
+        from prompt_piper.transformations import lexical
+        recorder.update_meta(bit_layouts=bit_layouts, seeds=seeds,
+                             stopword_list=lexical.STOPWORD_SOURCE)
+        self._log_samples(recorder, "search", run_cfg.search_split, [search_dataset[i] for i in search_idx])
+        self._log_samples(recorder, "test", run_cfg.test_split, test_dataset)
+
+        self._check_same_structure(exp, [search_dataset[i] for i in search_idx], test_dataset, recorder)
+
+        n_budget = run_cfg.pop_size * run_cfg.n_gen
+        expected: dict = {
+            "algorithm": None if run_cfg.baselines_only else run_cfg.algorithm,
+            "n_gen": None if run_cfg.baselines_only else run_cfg.n_gen,
+            "pop_size": None if run_cfg.baselines_only else run_cfg.pop_size,
+            "search_candidates": {
+                b: n_budget for b in (run_cfg.baselines or [])
+                if b in ("random_search", "multi_armed_bandit")
+            },
+            "test_labels": {},
+            "baselines": list(run_cfg.baselines or []),
+        }
 
         # ================================================================
         # BASELINES-ONLY mode: skip NSGA-II, run baselines on both splits
@@ -167,61 +230,59 @@ class CompressorRunner:
                 run_cfg, exp, test_dataset,
                 transform_ids, transform_names,
                 timestamp, fitting_report, fitting_elapsed,
+                recorder=recorder, expected=expected,
+                search_idx=search_idx, test_idx=test_idx,
+                bit_layouts=bit_layouts, seeds=seeds,
             )
 
         # ---- Search phase ------------------------------------------------
-        callback = GenerationCallback(transform_names)
+        callback = GenerationCallback(transform_names, recorder=recorder,
+                                      layout=bit_layouts["search"])
 
-        t_search_start = time.perf_counter()
         exp_result = exp.run(
             baselines=run_cfg.baselines,
             callback=callback,
         )
-        search_elapsed = time.perf_counter() - t_search_start
+        # The primary algorithm's own search time only (exp.run also runs every
+        # baseline's search, whose times are reported per baseline).
+        search_elapsed = exp_result.elapsed_time
+        if exp.search_indices != search_idx:
+            raise RuntimeError("Search subset differs from the recorded search sample ids.")
 
         # ---- Test evaluation phase ----------------------------------------
         t_eval_start = time.perf_counter()
-        test_objectives = exp.evaluate_solutions(exp_result.pareto_solutions, test_dataset)
-
-        # Baseline test evaluation — re-evaluate bit vectors on the test split.
-        # Custom baselines (truncated_prompt, random_deletion) store all-zero
-        # bit vectors which would evaluate as no-compression; run them on the
-        # test problem directly instead.
-        # Baselines that need re-running (not bit-vector re-evaluation) on test data:
-        # - custom baselines use score_transform_fn (no bit vector to replay)
-        # - full-op baselines used a different problem instance during search;
-        #   their bit vectors have a different length than the search problem.
-        _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion", "llmlingua2"}
-        _FULL_OP_BASELINES = exp._FULL_OP_BASELINES  # {"all_transformations", "summarization"}
-
-        full_test_problem = None  # built lazily
-        baseline_test: dict[str, tuple[float, float, float]] = {}
-        for name, br in exp_result.baselines.items():
-            t_bl_test = time.perf_counter()
-            if name in _CUSTOM_BASELINES:
-                test_br = exp.run_baseline(name, problem=exp._build_problem(test_dataset))
-                avg_tok = float(test_br.avg_tokens.mean())
-                avg_perf = float(test_br.avg_performance.mean())
-            elif name in _FULL_OP_BASELINES:
-                if full_test_problem is None:
-                    full_test_problem = exp._build_full_problem(test_dataset)
-                test_br = exp.run_baseline(name, problem=full_test_problem)
-                avg_tok = float(test_br.avg_tokens.mean())
-                avg_perf = float(test_br.avg_performance.mean())
-            else:
-                bl_test_obj = exp.evaluate_solutions(br.solutions, test_dataset)
-                avg_tok = float(bl_test_obj[:, 0].mean())
-                avg_perf = float(bl_test_obj[:, 1].mean())
-            baseline_test[name] = (avg_tok, avg_perf, time.perf_counter() - t_bl_test)
-
+        pareto_labels = [f"pareto:{i}" for i in range(len(exp_result.pareto_solutions))]
+        expected["test_labels"][run_cfg.algorithm] = pareto_labels
+        with recorder.phase("test", method=run_cfg.algorithm):
+            test_objectives = exp.evaluate_solutions(
+                exp_result.pareto_solutions, test_dataset, split="test", labels=pareto_labels,
+            )
+        # Test time of the primary algorithm's Pareto front only; baselines'
+        # test times are included in their own elapsed_seconds.
         eval_elapsed = time.perf_counter() - t_eval_start
+
+        baseline_test, baseline_solutions = self._evaluate_baselines_on_test(
+            exp, exp_result.baselines, test_dataset, recorder, expected,
+        )
+
+        # ---- Neutral-bit analysis (compression only, no model calls) -------
+        analysis_problem = exp.compression_problem()
+        noop_operators = {"search": bits_to_ids(
+            bit_layouts["search"],
+            [int(i in set(analysis_problem.noop_bits())) for i in range(analysis_problem.n_var)],
+        )}
+        recorder.update_meta(noop_operators=noop_operators)
+
+        def effective_names(bits):
+            keep = set(analysis_problem.effective_bits(bits))
+            return analysis_problem.names_from_bits([int(i in keep) for i in range(len(bits))])
 
         # ---- Assemble result ----------------------------------------------
         pareto_evals = []
         for i, (bits, names) in enumerate(
             zip(exp_result.pareto_solutions, exp_result.pareto_transformation_names)
         ):
-            ids = _bits_to_ids(transform_classes, bits)
+            ids = bits_to_ids(bit_layouts["search"], bits)
             pareto_evals.append(
                 SolutionEval(
                     transformation_ids=ids,
@@ -231,6 +292,7 @@ class CompressorRunner:
                     search_avg_performance=float(exp_result.pareto_objectives[i, 1]),
                     test_avg_tokens=float(test_objectives[i, 0]),
                     test_avg_performance=float(test_objectives[i, 1]),
+                    effective_transformation_names=effective_names(bits),
                 )
             )
 
@@ -253,8 +315,12 @@ class CompressorRunner:
                     test_avg_performance=b_test_perf,
                     elapsed_seconds=total_elapsed,
                     config=br.config,
+                    solutions=baseline_solutions.get(name, []),
                 )
             )
+
+        recorder.update_meta(expected=expected)
+        validation = self._validate(recorder)
 
         return CompressorResult(
             run_name=run_cfg.run_name,
@@ -270,7 +336,75 @@ class CompressorRunner:
             extra={"dry_run": self._dry_run},
             fitting_report=fitting_report,
             fitting_elapsed_seconds=fitting_elapsed,
+            log_dir=str(recorder.run_dir),
+            search_sample_ids=search_idx,
+            test_sample_ids=test_idx,
+            validation=validation,
+            bit_layouts=bit_layouts,
+            seeds=seeds,
+            noop_operators=noop_operators,
         )
+
+    def _evaluate_baselines_on_test(self, exp, baselines: dict, test_dataset, recorder, expected):
+        """Re-evaluate every baseline solution on the test split.
+
+        Returns ``(summary, solutions)``: *summary* maps name → ``(mean tokens,
+        mean performance, elapsed)``; *solutions* maps name → one dict per
+        solution with bits, names, and search and test objectives.
+        """
+        # Baselines that need re-running (not bit-vector re-evaluation) on test data:
+        # - custom baselines use score_transform_fn (no bit vector to replay)
+        # - full-op baselines used a different problem instance during search;
+        #   their bit vectors have a different length than the search problem.
+        _CUSTOM_BASELINES = {"truncated_prompt", "random_deletion", "llmlingua2"}
+        _FULL_OP_BASELINES = exp._FULL_OP_BASELINES  # {"summarization"}
+
+        full_test_problem = None  # built lazily
+        summary: dict[str, tuple[float, float, float]] = {}
+        solutions: dict[str, list[dict]] = {}
+        for name, br in baselines.items():
+            t_bl_test = time.perf_counter()
+            with recorder.phase("baseline_test", method=name):
+                if name in _CUSTOM_BASELINES:
+                    test_br = exp.run_baseline(name, problem=exp._build_problem(test_dataset, split="test"))
+                    test_obj = test_br.objectives
+                elif name in _FULL_OP_BASELINES:
+                    if full_test_problem is None:
+                        full_test_problem = exp._build_full_problem(test_dataset, split="test")
+                    test_br = exp.run_baseline(name, problem=full_test_problem)
+                    test_obj = test_br.objectives
+                else:
+                    labels = [f"{name}:{i}" for i in range(len(br.solutions))]
+                    expected["test_labels"][name] = labels
+                    test_obj = exp.evaluate_solutions(br.solutions, test_dataset, split="test", labels=labels)
+            summary[name] = (
+                float(test_obj[:, 0].mean()), float(test_obj[:, 1].mean()),
+                time.perf_counter() - t_bl_test,
+            )
+            solutions[name] = [
+                {
+                    "layout": "full" if name in _FULL_OP_BASELINES else "search",
+                    "bits": [int(b) for b in br.solutions[i]],
+                    "transformation_ids": bits_to_ids(
+                        exp.bit_layout(full=name in _FULL_OP_BASELINES), br.solutions[i],
+                    ),
+                    "transformation_names": br.transformation_names[i],
+                    "search_avg_tokens": float(br.objectives[i, 0]),
+                    "search_avg_performance": float(br.objectives[i, 1]),
+                    "test_avg_tokens": float(test_obj[i, 0]) if i < len(test_obj) else None,
+                    "test_avg_performance": float(test_obj[i, 1]) if i < len(test_obj) else None,
+                }
+                for i in range(len(br.solutions))
+            ]
+            _unbit_text_baselines(name, solutions[name])
+            if name in ("random_search", "multi_armed_bandit", "all_transformations"):
+                problem = exp.compression_problem()
+                for sol in solutions[name]:
+                    keep = set(problem.effective_bits(sol["bits"]))
+                    sol["effective_transformation_names"] = problem.names_from_bits(
+                        [int(i in keep) for i in range(len(sol["bits"]))]
+                    )
+        return summary, solutions
 
     def _run_baselines_only(
         self,
@@ -282,17 +416,36 @@ class CompressorRunner:
         timestamp: str,
         fitting_report,
         fitting_elapsed: float | None = None,
+        recorder=None,
+        expected: dict | None = None,
+        search_idx: list[int] | None = None,
+        test_idx: list[int] | None = None,
+        bit_layouts: dict | None = None,
+        seeds: dict | None = None,
     ) -> CompressorResult:
         """Run baselines on both search and test splits; no NSGA-II optimisation."""
-        search_problem = exp._build_problem(exp._sample_subset())
-        test_problem = exp._build_problem(test_dataset)
+        search_problem = exp._build_problem(exp._sample_subset(), split="search")
+        test_problem = exp._build_problem(test_dataset, split="test")
+        full_search = exp._build_full_problem(exp._sample_subset(), split="search")
+        full_test = exp._build_full_problem(test_dataset, split="test")
+        expected = expected or {"search_candidates": {}, "test_labels": {}}
 
         t_eval_start = time.perf_counter()
         baseline_evals = []
         for name in (run_cfg.baselines or []):
             t_bl = time.perf_counter()
-            search_br = exp.run_baseline(name, problem=search_problem)
-            test_br = exp.run_baseline(name, problem=test_problem)
+            full = name in exp._FULL_OP_BASELINES
+            with recorder.phase("baseline_search", method=name):
+                search_br = exp.run_baseline(name, problem=full_search if full else search_problem)
+            with recorder.phase("baseline_test", method=name):
+                if name in ("random_search", "multi_armed_bandit"):
+                    labels = [f"{name}:{i}" for i in range(len(search_br.solutions))]
+                    expected["test_labels"][name] = labels
+                    test_obj = exp.evaluate_solutions(
+                        search_br.solutions, test_dataset, split="test", labels=labels,
+                    )
+                else:
+                    test_obj = exp.run_baseline(name, problem=full_test if full else test_problem).objectives
             bl_elapsed = time.perf_counter() - t_bl
             baseline_evals.append(
                 BaselineEval(
@@ -300,13 +453,30 @@ class CompressorRunner:
                     transformation_names=search_br.transformation_names,
                     search_avg_tokens=float(search_br.avg_tokens.mean()),
                     search_avg_performance=float(search_br.avg_performance.mean()),
-                    test_avg_tokens=float(test_br.avg_tokens.mean()),
-                    test_avg_performance=float(test_br.avg_performance.mean()),
+                    test_avg_tokens=float(test_obj[:, 0].mean()),
+                    test_avg_performance=float(test_obj[:, 1].mean()),
                     elapsed_seconds=bl_elapsed,
                     config=search_br.config,
+                    solutions=_unbit_text_baselines(name, [
+                        {
+                            "layout": "full" if full else "search",
+                            "bits": [int(b) for b in search_br.solutions[i]],
+                            "transformation_ids": bits_to_ids(
+                                exp.bit_layout(full=full), search_br.solutions[i],
+                            ),
+                            "transformation_names": search_br.transformation_names[i],
+                            "search_avg_tokens": float(search_br.objectives[i, 0]),
+                            "search_avg_performance": float(search_br.objectives[i, 1]),
+                            "test_avg_tokens": float(test_obj[i, 0]) if i < len(test_obj) else None,
+                            "test_avg_performance": float(test_obj[i, 1]) if i < len(test_obj) else None,
+                        }
+                        for i in range(len(search_br.solutions))
+                    ]),
                 )
             )
         eval_elapsed = time.perf_counter() - t_eval_start
+        recorder.update_meta(expected=expected)
+        validation = self._validate(recorder)
 
         return CompressorResult(
             run_name=run_cfg.run_name,
@@ -322,7 +492,118 @@ class CompressorRunner:
             extra={"dry_run": self._dry_run, "baselines_only": True},
             fitting_report=fitting_report,
             fitting_elapsed_seconds=fitting_elapsed,
+            log_dir=str(recorder.run_dir),
+            search_sample_ids=search_idx or [],
+            test_sample_ids=test_idx or [],
+            validation=validation,
+            bit_layouts=bit_layouts or {},
+            seeds=seeds or {},
         )
+
+    # ------------------------------------------------------------------
+    # Logging and data-split helpers
+    # ------------------------------------------------------------------
+
+    def _open_recorder(self, name: str) -> RunRecorder:
+        """Create ``{output.dir}/{name}_log``; keep any leftover as ``.incomplete-*``."""
+        log_dir = Path(self._config.output.dir) / f"{name}_log"
+        if log_dir.exists():
+            ts = CompressorResult.now_timestamp().replace(":", "-")
+            backup = log_dir.with_name(f"{log_dir.name}.incomplete-{ts}")
+            log_dir.rename(backup)
+            logger.warning("Existing log directory moved to %s", backup)
+        return RunRecorder(log_dir)
+
+    @staticmethod
+    def _split_indices(run_cfg: RunConfig, n_search_total: int, n_test_total: int):
+        """Return ``(search_idx, test_idx)``; disjoint when both use the same split.
+
+        The search indices are exactly those drawn by
+        :meth:`Experiment._sample_subset`.  When search and test come from the
+        same source split, the test sample is drawn from the remaining items.
+        """
+        search_idx = sample_indices(n_search_total, run_cfg.n_search, run_cfg.subset_seed)
+        same = run_cfg.search_split == run_cfg.test_split
+        test_idx = sample_indices(
+            n_test_total, run_cfg.n_test, run_cfg.subset_seed + 1,
+            exclude=search_idx if same else (),
+        )
+        if same and set(search_idx) & set(test_idx):
+            raise RuntimeError("Search and test samples overlap.")
+        if len(search_idx) < run_cfg.n_search or (run_cfg.n_test is not None and len(test_idx) < run_cfg.n_test):
+            raise ValueError(
+                f"{run_cfg.run_name}: requested n_search={run_cfg.n_search}, n_test={run_cfg.n_test} "
+                f"but only {len(search_idx)} / {len(test_idx)} samples are available "
+                f"(source split sizes {n_search_total} / {n_test_total})."
+            )
+        return search_idx, test_idx
+
+    @staticmethod
+    def _check_same_structure(exp, search_samples, test_samples, recorder) -> None:
+        """Search and test prompts must share every static part.
+
+        The instruction, few-shot block, answer cue, separators and tail are
+        compressed once per strategy; if they differed between S and T (e.g.
+        a cue detected differently on the two corpora) the same strategy would
+        act on different text in search and test.  Raises on any difference.
+        """
+        from prompt_piper.transformations.sections import PromptSplitter
+
+        field = exp.config.compress_field or exp.config.prompt_field
+        static = ("instruction", "shots", "output_cue", "sep_after_instruction",
+                  "sep_after_shots", "sep_before_cue", "tail")
+        signatures = {}
+        for role, samples in (("search", search_samples), ("test", test_samples)):
+            sections = PromptSplitter(samples, compress_field=field).split_all()
+            sig = {tuple(getattr(sec, k) for k in static) for sec in sections}
+            signatures[role] = sig
+        same = len(signatures["search"]) == 1 and signatures["search"] == signatures["test"]
+        recorder.update_meta(static_sections_identical_across_splits=same,
+                             n_static_variants={k: len(v) for k, v in signatures.items()})
+        if not same and len(signatures["search"] | signatures["test"]) > 1 and all(
+            "_input_text" in s for s in search_samples + test_samples
+        ):
+            raise RuntimeError(
+                "Static prompt sections differ between search and test samples "
+                f"({ {k: len(v) for k, v in signatures.items()} } variants)."
+            )
+
+    @staticmethod
+    def _seeds(run_cfg: RunConfig) -> dict:
+        """Every seed that influences a run."""
+        return {
+            "subset_seed": run_cfg.subset_seed,          # search sample
+            "test_seed": run_cfg.subset_seed + 1,        # test sample
+            "algorithm_seed": run_cfg.seed,              # pymoo
+            "random_search_seed": run_cfg.seed,
+            "multi_armed_bandit_seed": run_cfg.seed,
+            "random_deletion_seed": run_cfg.seed,
+            "fitter_seed": run_cfg.seed,
+        }
+
+    @staticmethod
+    def _log_samples(recorder: RunRecorder, role: str, split: str, samples: list[dict]) -> None:
+        """Log the full content of every sample used in *role* (search / test)."""
+        for position, sample in enumerate(samples):
+            record = {"role": role, "source_split": split, "position": position}
+            for key, value in sample.items():
+                record["doc" if key == "_doc" else key.lstrip("_")] = value
+            recorder.write("samples", record)
+
+    @staticmethod
+    def _validate(recorder: RunRecorder) -> dict:
+        from prompt_piper.tools.validate_run import validate_run
+
+        report = validate_run(recorder.run_dir)
+        recorder.update_meta(validation=report)
+        if report["ok"]:
+            logger.info("Log validation passed: %s", report["counts"])
+        else:
+            logger.error(
+                "Log validation FAILED (%d problems), e.g.: %s",
+                report["n_errors"], report["errors"][:5],
+            )
+        return report
 
     # ------------------------------------------------------------------
     # Transferability analysis
@@ -422,12 +703,42 @@ class CompressorRunner:
 
         # Build target backend (reuses already-loaded model)
         target_backend = self._get_backend(target_run_cfg)
-        target_dataset = self._get_dataset(target_backend, target_run_cfg, split=target_run_cfg.test_split)
-        if target_run_cfg.n_test is not None:
-            import random
-            rng = random.Random(target_run_cfg.subset_seed + 1)
-            if target_run_cfg.n_test < len(target_dataset):
-                target_dataset = rng.sample(target_dataset, target_run_cfg.n_test)
+        test_full = self._get_dataset(target_backend, target_run_cfg, split=target_run_cfg.test_split)
+        if target_run_cfg.search_split == target_run_cfg.test_split:
+            search_full = test_full
+        else:
+            search_full = self._get_dataset(
+                target_backend, target_run_cfg, split=target_run_cfg.search_split,
+            )
+        search_idx, test_idx = self._split_indices(target_run_cfg, len(search_full), len(test_full))
+        target_dataset = [test_full[i] for i in test_idx]
+
+        recorder = self._open_recorder(f"transfer_{source_name}_to_{target_run_cfg.run_name}")
+        if target_backend.get("semantic_backend") is not None:
+            target_backend["semantic_backend"].recorder = recorder
+        labels = [f"pareto:{i}" for i in range(len(source_result.pareto_solutions))]
+        recorder.update_meta(
+            source_run=source_name,
+            target_run=target_run_cfg.run_name,
+            config=self._serialise_config(target_run_cfg),
+            same_source_split=target_run_cfg.search_split == target_run_cfg.test_split,
+            sample_ids={"search": search_idx, "test": test_idx},
+            expected={"search_candidates": {}, "test_labels": {"transfer": labels}},
+        )
+
+        # Adaptable operators are fitted on the *target* search sample, exactly as
+        # in the native target run: only the choice of operators is transferred.
+        # (LLM-backed fitting reuses the target run's calls via the persistent cache.)
+        semantic_backend = target_backend.get("semantic_backend")
+        factory = target_backend.get("transformation_factory")
+        fitting_report = None
+        if target_run_cfg.use_fitting:
+            with recorder.phase("fitting", method="fitter"):
+                fitted, fitting_report = self._run_fitting(
+                    target_run_cfg, [search_full[i] for i in search_idx], semantic_backend,
+                )
+            factory = self._compose_factory(fitted, semantic_backend)
+        recorder.update_meta(fitting_report=fitting_report, fitted_on="target search sample")
 
         exp_config = self._make_exp_config(target_run_cfg, n_subset=len(target_dataset))
         exp = Experiment(
@@ -436,15 +747,32 @@ class CompressorRunner:
             evaluator=target_backend["evaluator"],
             tokenizer=target_backend.get("tokenizer"),
             transformations=transform_classes,
-            transformation_factory=target_backend.get("transformation_factory"),
+            transformation_factory=factory,
+            recorder=recorder,
         )
+
+        recorder.update_meta(
+            bit_layouts={"search": exp.bit_layout(), "full": exp.bit_layout(full=True)},
+            source_bit_layouts=source_result.bit_layouts,
+            seeds=self._seeds(target_run_cfg),
+        )
+        self._log_samples(recorder, "test", target_run_cfg.test_split, target_dataset)
 
         # Reconstruct bit vectors from source Pareto solutions
         import numpy as np
         source_bits = np.array([sol.bits for sol in source_result.pareto_solutions], dtype=int)
+        if source_result.bit_layouts.get("search") not in (None, exp.bit_layout()):
+            raise ValueError("Source and target runs use different bit layouts.")
 
         # Evaluate on target dataset
-        target_objectives = exp.evaluate_solutions(source_bits, target_dataset)
+        try:
+            with recorder.phase("transfer_test", method="transfer"):
+                target_objectives = exp.evaluate_solutions(
+                    source_bits, target_dataset, split="test", labels=labels,
+                )
+            self._validate(recorder)
+        finally:
+            recorder.close()
 
         solutions = []
         for sol, obj in zip(source_result.pareto_solutions, target_objectives):
@@ -538,7 +866,15 @@ class CompressorRunner:
         )
         tokenizer = LMEvalTokenizer(model)
         semantic_backend = (
-            LMEvalSemanticBackend(model, apply_chat_template=run_cfg.apply_chat_template)
+            LMEvalSemanticBackend(
+                model,
+                apply_chat_template=run_cfg.apply_chat_template,
+                # Persistent cache shared by every run writing to this output dir
+                # (one dir per model), so LLM rewrites are reused for search,
+                # test, baselines, fitting and later runs.
+                cache_path=str(Path(self._config.output.dir) / "semantic_llm_cache.jsonl"),
+                model_id=self._config.model.name,
+            )
             if run_cfg.use_llm_for_semantic else None
         )
 
@@ -561,9 +897,23 @@ class CompressorRunner:
     def _get_dataset(
         self, backend: dict, run_cfg: RunConfig, split: str
     ) -> list[dict]:
+        """Return the sample dicts of *split*, each tagged with its index.
+
+        ``_sample_id`` (position in the split) and ``_split`` are attached to
+        every sample so that logged records identify samples unambiguously.
+        """
+        samples = self._load_dataset(backend, run_cfg, split)
+        for i, sample in enumerate(samples):
+            sample["_sample_id"] = i
+            sample["_split"] = split
+        return samples
+
+    def _load_dataset(
+        self, backend: dict, run_cfg: RunConfig, split: str
+    ) -> list[dict]:
         """Return a list of sample dicts for the given split."""
         if self._dry_run or backend["task"] is None:
-            samples = self._synthetic_dataset(n=max(run_cfg.n_search, run_cfg.n_test or 0) + 10)
+            samples = self._synthetic_dataset(n=run_cfg.n_search + (run_cfg.n_test or 0) + 10)
             if run_cfg.instruction_prefix:
                 prefix = run_cfg.instruction_prefix.rstrip("\n")
                 base_field = run_cfg.compress_field or "prompt_0shot"
@@ -654,8 +1004,10 @@ class CompressorRunner:
             pop_size=run_cfg.pop_size,
             n_gen=run_cfg.n_gen,
             seed=run_cfg.seed,
+            mab_reward_weight=run_cfg.mab_reward_weight,
             transformation_ids=run_cfg.transformation_ids,
             search_transformation_ids=run_cfg.search_transformation_ids,
+            preserve_answer_cue=run_cfg.preserve_answer_cue,
             verbose=False,
         )
 
@@ -678,11 +1030,22 @@ class CompressorRunner:
         is performed.
         """
         from prompt_piper.transformations.fitting import DatasetVocabularyFitter
+        from prompt_piper.transformations.sections import PromptSplitter
 
-        logger.info("Running DatasetVocabularyFitter on %d samples…", len(dataset))
+        # The fitter sees the text the operators act on: the uncompressed
+        # assembled prompt (instruction + shots + data + cue).  Frequency-based
+        # fitters count only the per-sample data section (see frequency_field).
+        compress_field = run_cfg.effective_compress_field or run_cfg.prompt_field
+        sections = PromptSplitter(dataset, compress_field=compress_field).split_all()
+        corpus = [
+            {**sample, "_fit_text": sec.assemble(), "_fit_varying": sec.input_data}
+            for sample, sec in zip(dataset, sections)
+        ]
+        logger.info("Running DatasetVocabularyFitter on %d samples…", len(corpus))
         fitter = DatasetVocabularyFitter(
-            dataset,
-            prompt_field=run_cfg.prompt_field,
+            corpus,
+            prompt_field="_fit_text",
+            frequency_field="_fit_varying",
             template_field=run_cfg.effective_compress_field,
             compress_field=run_cfg.effective_compress_field,
             seed=run_cfg.seed,

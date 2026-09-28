@@ -75,6 +75,9 @@ class SolutionEval:
     # Test-phase objectives (on the held-out test split); None until evaluated
     test_avg_tokens: float | None = None
     test_avg_performance: float | None = None
+    #: Active operators whose removal changes at least one search prompt
+    #: (the others are neutral bits); ``None`` for results that predate it.
+    effective_transformation_names: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,10 @@ class BaselineEval:
     elapsed_seconds: float | None = None
     # Hyperparameters used to configure this baseline
     config: dict = field(default_factory=dict)
+    #: One entry per solution returned by the baseline (several for Random
+    #: Search / MAB, one otherwise): bits, operator names, and search and test
+    #: objectives.  The ``*_avg_*`` fields above are means over these entries.
+    solutions: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +157,23 @@ class CompressorResult:
     #: Wall-clock seconds for the fitting phase.  ``None`` when fitting was
     #: skipped (``use_fitting=False``).
     fitting_elapsed_seconds: float | None = None
+    #: Directory with the complete per-evaluation logs of this run
+    #: (see :mod:`prompt_piper.optimization.recorder`).
+    log_dir: str | None = None
+    #: Dataset indices (within their split) of the search and test samples.
+    search_sample_ids: list[int] = field(default_factory=list)
+    test_sample_ids: list[int] = field(default_factory=list)
+    #: Output of :func:`prompt_piper.tools.validate_run.validate_run`.
+    validation: dict | None = None
+    #: Bit layouts (``"search"``: search problem, ``"full"``: full-operator
+    #: problem used by all_transformations / summarization); see
+    #: :mod:`prompt_piper.optimization.bits`.
+    bit_layouts: dict = field(default_factory=dict)
+    #: Every seed used by the run.
+    seeds: dict = field(default_factory=dict)
+    #: Operators that change no search prompt when applied alone, per layout
+    #: (``{"search": ["O16@data", …]}``).
+    noop_operators: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Serialisation

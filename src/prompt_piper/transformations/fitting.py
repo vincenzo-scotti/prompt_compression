@@ -152,6 +152,7 @@ class DatasetVocabularyFitter:
         backend: Backend | None = None,
         template_field: str | None = None,
          compress_field: str | None = None,
+        frequency_field: str | None = None,
     ) -> None:
         corpus = dataset
         if sample_size is not None and sample_size < len(dataset):
@@ -159,6 +160,11 @@ class DatasetVocabularyFitter:
             corpus = rng.sample(dataset, sample_size)
         self._corpus = corpus
         self._prompt_field = prompt_field
+        #: Field with the per-sample (varying) text used by document-frequency
+        #: fitters (O3, O5, O18).  Static text (instruction, shots) occurs in
+        #: every document, so counting it would turn all of its words into
+        #: "corpus stopwords".  ``None`` falls back to *prompt_field*.
+        self._frequency_field = frequency_field
         self._target_field = target_field
         self._seed = seed
         self._backend = backend
@@ -202,6 +208,10 @@ class DatasetVocabularyFitter:
         """
         base_map = dict(_DEFAULT_LABEL_MAP) if extend_default else {}
         targets = self._get_targets()
+        if not self._targets_are_labels(targets):
+            # Free-form targets (code, numbers, sentences) are not output labels:
+            # shortening them would rewrite prompt content, not labels.
+            return LabelShortening(label_map=base_map)
 
         for raw in sorted(set(targets)):
             label = raw.strip()
@@ -218,6 +228,19 @@ class DatasetVocabularyFitter:
                 base_map[label.lower()] = short
 
         return LabelShortening(label_map=base_map)
+
+    @staticmethod
+    def _targets_are_labels(targets: list[str], max_unique: int = 20, max_words: int = 4) -> bool:
+        """True when targets look like a small closed set of categorical labels."""
+        unique = {t.strip() for t in targets if t and t.strip()}
+        if not unique or len(unique) > max(max_unique, 0) or len(unique) > 0.5 * max(len(targets), 1):
+            return False
+        for t in unique:
+            if len(t.split()) > max_words or "\n" in t:
+                return False
+            if re.fullmatch(r"[-+$]?[\d.,]+%?", t):
+                return False
+        return True
 
     def fit_abbreviation_substitution(
         self,
@@ -247,7 +270,7 @@ class DatasetVocabularyFitter:
         extend_default:
             Prepend the mined entries to ``_ABBREVIATIONS`` (default).
         """
-        prompts = self._get_prompts()
+        prompts = self._get_frequency_texts()
         n_docs = len(prompts)
         threshold = max(1, int(min_doc_freq * n_docs))
 
@@ -334,7 +357,7 @@ class DatasetVocabularyFitter:
         extend_default:
             Merge the mined headings with ``_DEFAULT_PRUNABLE_SECTIONS``.
         """
-        prompts = self._get_prompts()
+        prompts = self._get_frequency_texts()
         n_docs = len(prompts)
         threshold = max(1, int(min_doc_freq * n_docs))
 
@@ -385,7 +408,7 @@ class DatasetVocabularyFitter:
             Union with ``_STOPWORDS`` (default).  Set to ``False`` to
             return only the mined stopwords.
         """
-        prompts = self._get_prompts()
+        prompts = self._get_frequency_texts()
         n_docs = len(prompts)
         threshold = max(1, int(min_doc_freq * n_docs))
 
@@ -1124,6 +1147,10 @@ class DatasetVocabularyFitter:
             str(s.get(self._prompt_field, ""))
             for s in self._corpus
         ]
+
+    def _get_frequency_texts(self) -> list[str]:
+        field = self._frequency_field or self._prompt_field
+        return [str(s.get(field, "")) for s in self._corpus]
 
     def _get_targets(self) -> list[str]:
         return [

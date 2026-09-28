@@ -7,7 +7,7 @@ YAML schema example
 .. code-block:: yaml
 
     model:
-      type: hf                              # hf | openai | openai-chat-completions | vllm | gemini
+      type: hf                              # hf | openai | openai-chat-completions | openai-chat | vllm | gemini | llama-cpp
       name: mistralai/Mistral-7B-Instruct-v0.3
       kwargs:                               # forwarded to model constructor
         device: cuda
@@ -119,6 +119,9 @@ class RunConfig:
     n_gen: int = 100
     seed: int = 42
     subset_seed: int = 42
+    #: Weight of performance in the multi_armed_bandit reward
+    #: ``w · performance + (1 − w) · compression`` (``1`` = performance only).
+    mab_reward_weight: float = 0.5
     transformation_ids: list[str] | None = None
     #: Restrict the NSGA-II / MAB / random_search operator pool to these IDs.
     #: ``all_transformations`` and ``summarization`` baselines always use the
@@ -161,6 +164,11 @@ class RunConfig:
     #: Format few-shot examples as separate conversation turns.  Only
     #: meaningful when ``apply_chat_template`` is also ``True``.
     fewshot_as_multiturn: bool = False
+    #: Text-level baselines (truncated_prompt, random_deletion, llmlingua2)
+    #: keep the answer cue and tail (e.g. MBPP's code opener) unchanged and act
+    #: only on instruction + shots + data.  Default False: they act on the
+    #: whole prompt (behaviour of the submitted paper).
+    preserve_answer_cue: bool = False
 
     @property
     def run_name(self) -> str:
@@ -319,6 +327,7 @@ class CompressorConfig:
             output=self.output,
             defaults=self.defaults,
             runs=new_runs,
+            transferability=self.transferability,
         )
 
     # ------------------------------------------------------------------

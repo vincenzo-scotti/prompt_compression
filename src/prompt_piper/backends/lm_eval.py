@@ -25,8 +25,12 @@ Requirements
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
+import time
+from pathlib import Path
 from typing import Callable, Iterator
 
 import numpy as np
@@ -49,6 +53,37 @@ def _require_lm_eval():
         raise ImportError(
             "LM Evaluation Harness is required: pip install lm-eval"
         ) from exc
+
+
+class GenerationText(str):
+    """Generated text that also carries the provider's ``usage`` record.
+
+    lm-eval passes generated strings through unchanged, so attaching the
+    response's ``usage`` (billed prompt / completion / reasoning tokens) to the
+    string lets the evaluator log exact provider token counts per request,
+    also when requests run concurrently.
+    """
+
+    usage: dict | None = None
+
+
+def _parse_generations_with_usage(outputs, **kwargs) -> list:
+    """Chat-completions ``parse_generations`` that keeps each response's usage."""
+    from lm_eval.models.openai_completions import LocalChatCompletion
+
+    res = []
+    for out in outputs if isinstance(outputs, list) else [outputs]:
+        usage = out.get("usage") if isinstance(out, dict) else None
+        if isinstance(out, dict) and "timings" in out:  # llama.cpp server
+            usage = {**(usage or {}), "timings": out["timings"]}
+        for text in LocalChatCompletion.parse_generations(out):
+            if text is None:
+                res.append(None)
+            else:
+                t = GenerationText(text)
+                t.usage = usage
+                res.append(t)
+    return res
 
 
 def _load_model(model_type: str, model_name: str, **kwargs):
@@ -89,6 +124,8 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         from lm_eval.models.openai_completions import LocalChatCompletion, OpenAIChatCompletion
 
         class _OpenAIChatModel(OpenAIChatCompletion):
+            parse_generations = staticmethod(_parse_generations_with_usage)
+
             def __init__(self, drop_stop_sequences: bool = False, **kw):
                 self._drop_stop = drop_stop_sequences
                 super().__init__(**kw)
@@ -132,6 +169,8 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         )
 
         class _GeminiChatCompletion(OpenAIChatCompletion):
+            parse_generations = staticmethod(_parse_generations_with_usage)
+
             def __init__(self, base_url=_GEMINI_BASE_URL,
                          disable_thinking: bool = False, **kw):
                 self._disable_thinking = disable_thinking
@@ -177,10 +216,80 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                 return payload
 
         return _GeminiChatCompletion(model=model_name, **kwargs)
+    if model_type in ("llama-cpp", "llamacpp", "llama.cpp"):
+        return _make_llama_cpp_model(model_name, **kwargs)
     raise ValueError(
         f"Unknown model type {model_type!r}. "
-        "Supported: 'hf'/'huggingface', 'openai', 'openai-chat-completions', 'openai-chat', 'vllm', 'gemini'."
+        "Supported: 'hf'/'huggingface', 'openai', 'openai-chat-completions', 'openai-chat', "
+        "'vllm', 'gemini', 'llama-cpp'."
     )
+
+
+_LLAMA_CPP_DEFAULT_URL = "http://localhost:8080/v1/chat/completions"
+
+
+def _make_llama_cpp_model(model_name: str, **kwargs):
+    """Chat model served by a llama.cpp ``llama-server`` (OpenAI-compatible API).
+
+    Start the server with e.g.
+    ``llama-server -m model.gguf --port 8080 --jinja`` (``--jinja`` applies the
+    model's chat template).  YAML::
+
+        model:
+          type: llama-cpp
+          name: qwen3.5-9b-q4_k_m          # label only; the server decides the model
+          kwargs:
+            base_url: http://localhost:8080/v1/chat/completions
+            num_concurrent: 1              # match the server's --parallel slots
+
+    Token counts use the server's own ``/tokenize`` endpoint, so they reflect
+    the served model's vocabulary exactly.  An API key, if the server was
+    started with ``--api-key``, is read from ``LLAMA_CPP_API_KEY``.
+    Log-likelihood tasks are not supported (no prompt log-probs over this API).
+    """
+    import os as _os
+
+    import requests
+    from lm_eval.models.openai_completions import LocalChatCompletion
+
+    class _LlamaCppChatCompletion(LocalChatCompletion):
+        parse_generations = staticmethod(_parse_generations_with_usage)
+
+        def __init__(self, base_url: str = _LLAMA_CPP_DEFAULT_URL, **kw):
+            kw.setdefault("tokenizer_backend", None)
+            kw.setdefault("tokenized_requests", False)
+            super().__init__(base_url=base_url, **kw)
+            self.server_url = base_url.split("/v1/")[0].rstrip("/")
+
+        @property
+        def api_key(self):
+            return _os.environ.get("LLAMA_CPP_API_KEY", "")
+
+        def _create_payload(self, messages, generate=False, gen_kwargs=None,
+                            seed=1234, eos=None, **kw):
+            payload = super()._create_payload(
+                messages, generate=generate, gen_kwargs=gen_kwargs, seed=seed, eos=eos, **kw
+            )
+            for key in ("num_beams", "num_return_sequences", "length_penalty",
+                        "no_repeat_ngram_size", "early_stopping", "min_length",
+                        "min_new_tokens", "do_sample"):
+                payload.pop(key, None)
+            if "stop" in payload and not payload["stop"]:
+                payload.pop("stop", None)
+            return payload
+
+        def count_tokens(self, text: str) -> int:
+            headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+            response = requests.post(
+                f"{self.server_url}/tokenize",
+                json={"content": text, "add_special": False},
+                headers=headers,
+                timeout=60,
+            )
+            response.raise_for_status()
+            return len(response.json()["tokens"])
+
+    return _LlamaCppChatCompletion(model=model_name, **kwargs)
 
 
 def _collect_tasks(node, out: dict) -> None:
@@ -423,6 +532,11 @@ class LMEvalTokenizer(Tokenizer):
     def _build_counter(model):
         """Return a callable ``(text: str) -> int`` for the given model."""
         tok_attr = getattr(model, "tokenizer", None)
+
+        # ---- 0. model-provided exact counter (e.g. llama.cpp /tokenize) --
+        count_fn = getattr(model, "count_tokens", None)
+        if callable(count_fn):
+            return count_fn
 
         # ---- 1. tokenizer object with .encode() -------------------------
         # Explicitly exclude plain strings — str.encode() returns bytes, not
@@ -713,24 +827,76 @@ class LMEvalDataset:
                 template = task.fewshot_context(doc, 0, rnd=None, description=None)
             sample[self._template_field] = template
 
-            # Plain-text shots block: prefix of the plain full prompt that
-            # precedes the 0-shot portion.  Stored so PromptSplitter can use
-            # it directly rather than re-detecting via regex.
-            if self._shots_field is not None and self._num_fewshot > 0:
-                try:
-                    plain_full = task.fewshot_context(doc, self._num_fewshot)
-                except TypeError:
-                    plain_full = task.fewshot_context(
-                        doc, self._num_fewshot, rnd=None, description=None
-                    )
-                idx = plain_full.find(template)
-                sample[self._shots_field] = (
-                    plain_full[:idx].rstrip("\n") if idx > 0 else ""
-                )
-            elif self._shots_field is not None:
-                sample[self._shots_field] = ""
+            if self._shots_field is not None:
+                sample.update(self._structure(task, doc, template))
 
         return sample
+
+
+    def _structure(self, task, doc, template: str) -> dict:
+        """Cut lm-eval's exact plain-text prompt into its parts.
+
+        lm-eval renders a plain-text prompt as ``description + shots +
+        doc_to_text(doc) + tail`` (``tail`` = delimiter + ``gen_prefix`` when the
+        task defines one, e.g. MBPP's code-block opener).  The parts are taken
+        from lm-eval's own output, so re-assembling them reproduces its prompt
+        exactly:
+
+        * ``_description`` — static task description (goes to the instruction section);
+        * ``_shots`` — the few-shot block, including its trailing delimiter;
+        * ``_input_text`` — the per-sample text (question + answer cue);
+        * ``_tail`` — text lm-eval appends after the sample text (never compressed);
+        * ``_reference_prompt`` — lm-eval's full prompt, for verification.
+
+        Raises ``ValueError`` when the prompt cannot be cut consistently, instead
+        of silently dropping the shots.
+        """
+        text = task.doc_to_text(doc)
+        if not isinstance(text, str):
+            raise ValueError(f"doc_to_text returned {type(text).__name__}; cannot locate the sample text")
+        gen_prefix = None
+        if hasattr(task, "doc_to_prefix"):
+            try:
+                gen_prefix = task.doc_to_prefix(doc)
+            except Exception:
+                gen_prefix = None
+        try:
+            reference = task.fewshot_context(doc, self._num_fewshot, gen_prefix=gen_prefix)
+        except TypeError:
+            reference = task.fewshot_context(doc, self._num_fewshot)
+        pos_zero = template.rfind(text)
+        pos_full = reference.rfind(text)
+        if pos_zero < 0 or pos_full < 0:
+            raise ValueError("sample text not found in lm-eval's prompt")
+        description = template[:pos_zero]
+        if not reference.startswith(description):
+            raise ValueError("few-shot prompt does not start with the task description")
+        shots = reference[len(description):pos_full]
+        if self._num_fewshot > 0 and not shots.strip():
+            raise ValueError(f"expected {self._num_fewshot} shots but found none")
+        return {
+            "_description": description,
+            self._shots_field: shots,
+            "_input_text": text,
+            "_tail": reference[pos_full + len(text):],
+            "_reference_prompt": reference,
+        }
+
+
+def _first_fenced_block(text: str) -> str:
+    """Content of the first complete ```...``` block that starts on its own line."""
+    m = re.search(r"(?:^|\n)```[\w+-]*\n(.*?)\n?```", text, re.DOTALL)
+    return m.group(1) if m and m.group(1).strip() else ""
+
+
+def _is_python(code: str) -> bool:
+    import ast
+
+    try:
+        ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    return bool(code.strip())
 
 
 # ---------------------------------------------------------------------------
@@ -867,13 +1033,22 @@ i      ``process_results`` metric.
         samples: list[dict],
     ) -> list[float]:
         """Score a batch of compressed prompts in a single model call."""
+        return [d["score"] for d in self.evaluate_batch_detailed(originals, compresseds, samples)]
+
+    def evaluate_batch_detailed(
+        self,
+        originals: list[str],
+        compresseds: list[str],
+        samples: list[dict],
+    ) -> list[dict]:
+        """Score a batch and return per-sample details (output, metrics, …)."""
         if not samples:
             return []
 
         output_type = getattr(self._get_task(samples[0]), "OUTPUT_TYPE", "generate_until")
         if output_type in ("multiple_choice", "loglikelihood"):
-            return self._eval_multiple_choice_batch(compresseds, samples)
-        return self._eval_generation_batch(compresseds, samples)
+            return self._eval_multiple_choice_batch(compresseds, samples, detailed=True)
+        return self._eval_generation_batch(compresseds, samples, detailed=True)
 
     # ------------------------------------------------------------------
     # Strategy implementations
@@ -903,21 +1078,28 @@ i      ``process_results`` metric.
         return 1.0 if choices[predicted] == gold else 0.0
 
     def _eval_multiple_choice_batch(
-        self, prompts: list[str], samples: list[dict]
-    ) -> list[float]:
-        """Batched loglikelihood scoring: one model call for all samples."""
+        self, prompts: list[str], samples: list[dict], detailed: bool = False
+    ) -> list:
+        """Batched loglikelihood scoring: one model call for all samples.
+
+        With ``detailed=True`` returns one dict per sample (score, per-choice
+        log-probabilities, predicted index, gold) instead of bare scores.
+        """
         first_task = self._get_task(samples[0])
         first_doc = samples[0].get("_doc")
         try:
             first_task.doc_to_choice(first_doc)
         except AttributeError:
-            return self._eval_generation_batch(prompts, samples)
+            return self._eval_generation_batch(prompts, samples, detailed=detailed)
 
         # Empty prompts (fully compressed away) cannot be tokenised; score 0.
         scores: list[float] = [0.0] * len(prompts)
+        details: list[dict] = [
+            {"score": 0.0, "error": "empty prompt"} for _ in prompts
+        ]
         valid = [(i, p, s) for i, (p, s) in enumerate(zip(prompts, samples)) if p.strip()]
         if not valid:
-            return scores
+            return details if detailed else scores
 
         requests = []
         choices_counts: list[int] = []
@@ -949,7 +1131,14 @@ i      ``process_results`` metric.
                 scores[orig_i] = 1.0 if predicted == gold else 0.0
             else:
                 scores[orig_i] = 1.0 if choices[predicted] == gold else 0.0
-        return scores
+            details[orig_i] = {
+                "score": scores[orig_i],
+                "loglikelihoods": [float(lp) for lp in log_probs],
+                "choices": [str(c) for c in choices],
+                "predicted": predicted,
+                "gold": gold,
+            }
+        return details if detailed else scores
 
     def _eval_generation(self, prompt: str, doc, task) -> float:
         """Generation-based scoring for open-ended tasks."""
@@ -970,16 +1159,24 @@ i      ``process_results`` metric.
             return 0.0
 
     def _eval_generation_batch(
-        self, prompts: list[str], samples: list[dict]
-    ) -> list[float]:
-        """Batched generation scoring: one model call for all samples."""
+        self, prompts: list[str], samples: list[dict], detailed: bool = False
+    ) -> list:
+        """Batched generation scoring: one model call for all samples.
+
+        With ``detailed=True`` returns one dict per sample (score, raw output,
+        the exact prompt sent, filtered answer, full metrics, error) instead
+        of bare scores.
+        """
         # Empty prompts (fully compressed away) produce a zero-length token
         # tensor, causing an IndexError in HFLM._model_generate when it
         # accesses attention_mask[:, -1].  Skip them and return 0.0.
         scores: list[float] = [0.0] * len(prompts)
+        details: list[dict] = [
+            {"score": 0.0, "error": "empty prompt"} for _ in prompts
+        ]
         valid = [(i, p, s) for i, (p, s) in enumerate(zip(prompts, samples)) if p.strip()]
         if not valid:
-            return scores
+            return details if detailed else scores
 
         use_chat = _is_chat_model(self._model)
         requests = [
@@ -997,19 +1194,30 @@ i      ``process_results`` metric.
         ]
         generated_texts = _call_model(self._model, "generate_until", requests)
 
-        for (orig_i, _, sample), generated in zip(valid, generated_texts):
+        for (orig_i, _, sample), generated, request in zip(valid, generated_texts, requests):
             task = self._get_task(sample)
             doc = sample.get("_doc")
             filtered = self._apply_filter_list(generated, task, doc)
+            detail: dict = {
+                "output": str(generated),
+                "provider_usage": getattr(generated, "usage", None),
+                "sent_prompt": str(request.args[0] if hasattr(request, "args") else request[0]),
+                "filtered": filtered,
+                "gen_kwargs": self._gen_kwargs,
+            }
             try:
                 metrics: dict = task.process_results(doc, filtered)
                 value = float(self._pick_metric(metrics))
                 scores[orig_i] = max(0.0, min(1.0, value))
+                detail["metrics"] = metrics
             except Exception as exc:
                 logger.warning(
                     "LMEvalEvaluator: process_results failed (%s); returning 0.0", exc
                 )
-        return scores
+                detail["error"] = f"process_results failed: {exc!r}"
+            detail["score"] = scores[orig_i]
+            details[orig_i] = detail
+        return details if detailed else scores
 
     # ------------------------------------------------------------------
     # Generation helpers
@@ -1117,9 +1325,13 @@ i      ``process_results`` metric.
         for filter_spec in filter_list:
             result = generated
             ok = True
+            fallback = None
             for step in filter_spec.get("filter", []):
                 fn = step.get("function")
                 if fn == "regex":
+                    # lm-eval's RegexFilter returns its fallback ("[invalid]" by
+                    # default) when nothing matches; never the raw generation.
+                    fallback = step.get("fallback", "[invalid]")
                     pattern = step.get("regex_pattern", "")
                     # group_select picks which match from finditer (0=first, -1=last)
                     group_select = step.get("group_select", 0)
@@ -1150,7 +1362,22 @@ i      ``process_results`` metric.
                         try:
                             batch_out = filter_fn([[result]], [doc or {}])
                             extracted = batch_out[0][0] if (batch_out and batch_out[0]) else ""
-                            if extracted:
+                            # lm-eval's MBPP extractor assumes the response
+                            # continues a prefilled "```python" opener, and fails
+                            # on (a) continuations starting with "def" (its regex
+                            # takes "def" as a language tag), (b) chat models,
+                            # which cannot be prefilled and may write prose before
+                            # their own block.  Use the first candidate that is
+                            # valid Python, lm-eval's own extraction first.
+                            candidates = [
+                                extracted,
+                                _first_fenced_block(result),
+                                result.split("```")[0],
+                            ]
+                            valid = next((c for c in candidates if _is_python(c)), None)
+                            if valid is not None:
+                                result = valid
+                            elif extracted:
                                 result = extracted
                             else:
                                 # filter_fn returned empty (e.g. extract_code_blocks
@@ -1175,7 +1402,10 @@ i      ``process_results`` metric.
                                 "Custom filter %r raised %s; keeping raw text.",
                                 filter_spec.get("name"), exc,
                             )
-            results.append(result if (ok and result) else generated)
+            if not ok and fallback is not None:
+                results.append(fallback)
+            else:
+                results.append(result if (ok and result) else generated)
         return results
 
 
@@ -1240,6 +1470,8 @@ class LMEvalSemanticBackend:
         prompt_template: str | None = None,
         system_prompt: str | None = None,
         apply_chat_template: bool = False,
+        cache_path: str | None = None,
+        model_id: str | None = None,
     ) -> None:
         self._model = model
         self._max_gen_toks = max_gen_toks
@@ -1247,19 +1479,101 @@ class LMEvalSemanticBackend:
         self._template = prompt_template  # None → auto-select in __call__
         self._system_prompt = system_prompt or _SEMANTIC_SYSTEM_PROMPT
         self._use_chat = apply_chat_template
-        # Cache: identical (text, instruction) pairs — common when the shared
-        # task description is the same across many dataset samples — are
+        # In-memory cache: identical (text, instruction) pairs — common when the
+        # shared task description is the same across many dataset samples — are
         # compressed only once and the result reused for all subsequent calls.
         self._cache: dict[tuple[str, str], str] = {}
+        #: Optional :class:`~prompt_piper.optimization.recorder.RunRecorder`;
+        #: when set, every call (including cache hits) is logged.
+        self.recorder = None
+        # Persistent cache (JSONL, append-only), shared by search, test,
+        # baselines, fitting and all runs using the same file.  Keyed by the
+        # model id, the exact prompt sent and the generation settings, so a
+        # change to any of them never reuses a stale answer.
+        candidates = [model_id, getattr(model, "pretrained", None), getattr(model, "model", None)]
+        self._model_id = next((c for c in candidates if isinstance(c, str) and c), type(model).__name__)
+        self._cache_path = Path(cache_path) if cache_path else None
+        self._disk: dict[str, str] = {}
+        if self._cache_path is not None and self._cache_path.exists():
+            with open(self._cache_path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        entry = json.loads(line)
+                        self._disk[entry["key"]] = entry["output"]
 
     def __call__(self, text: str, instruction: str) -> str:
         key = (text, instruction)
         if key in self._cache:
+            self._log(text, instruction, self._cache[key], source="memory")
             return self._cache[key]
 
+        actual_prompt, gen_kwargs = self._build_request(text, instruction)
+        disk_key = hashlib.sha1(json.dumps(
+            [self._model_id, str(actual_prompt), gen_kwargs], sort_keys=True,
+        ).encode("utf-8")).hexdigest()
+        if disk_key in self._disk:
+            compressed = self._disk[disk_key]
+            self._cache[key] = compressed
+            self._log(text, instruction, compressed, source="disk", disk_key=disk_key)
+            return compressed
+
+        t0 = time.perf_counter()
+        instance = _make_instance("generate_until", {}, (actual_prompt, gen_kwargs), 0)
+        result = _call_model(self._model, "generate_until", [instance])
+        compressed = result[0].strip()
+        usage = getattr(result[0], "usage", None)  # provider usage, when returned
+        elapsed = time.perf_counter() - t0
+        self._cache[key] = compressed
+        self._disk[disk_key] = compressed
+        if self._cache_path is not None:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._cache_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({
+                    "key": disk_key, "model_id": self._model_id,
+                    "prompt": str(actual_prompt), "gen_kwargs": gen_kwargs,
+                    "instruction": instruction, "text": text,
+                    "output": compressed, "raw_output": str(result[0]),
+                    "provider_usage": usage, "elapsed_seconds": elapsed,
+                }, ensure_ascii=False) + "\n")
+                f.flush()
+        self._log(text, instruction, compressed, source="llm", disk_key=disk_key,
+                  elapsed=elapsed, prompt=actual_prompt, raw=str(result[0]), usage=usage)
+        return compressed
+
+    def _log(self, text, instruction, output, source, disk_key=None, elapsed=None,
+             prompt=None, raw=None, usage=None) -> None:
+        if self.recorder is None:
+            return
+        record = {
+            **self.recorder.context,
+            "kind": "semantic_backend",
+            "source": source,              # "llm" | "disk" | "memory"
+            "cached": source != "llm",
+            "cache_key": disk_key,
+            "text_sha": self.recorder.store_text(text),
+            "instruction": instruction,
+            "output": output,
+        }
+        if source == "llm":
+            record.update(
+                id=self.recorder.next_id("llm_calls"),
+                prompt=str(prompt), raw_output=raw, elapsed_seconds=elapsed,
+                provider_usage=usage,
+            )
+        self.recorder.write("llm_calls", record)
+
+    def _build_request(self, text: str, instruction: str):
+        """Return ``(prompt_to_send, gen_kwargs)`` for one compression request."""
+        chat = _is_chat_model(self._model) or self._use_chat or _hf_model_has_chat_template(self._model)
+        # The rewrite of a multi-paragraph section can itself span paragraphs:
+        # chat models stop at end-of-turn, so no "\n\n" stop (it would keep only
+        # the first paragraph, which the length guard would then accept).  The
+        # token cap scales with the input; API chat models may spend part of
+        # the budget on hidden reasoning tokens, hence a higher floor.
+        floor = 4096 if _is_chat_model(self._model) else self._max_gen_toks
         gen_kwargs = {
-            "until": self._stop_sequences,
-            "max_gen_toks": self._max_gen_toks,
+            "until": [] if chat else self._stop_sequences,
+            "max_gen_toks": max(floor, len(text) // 2 + 256),
         }
         if _is_chat_model(self._model):
             user_content = f"{instruction}\n\n[TEXT]\n{text}\n[/TEXT]"
@@ -1269,12 +1583,7 @@ class LMEvalSemanticBackend:
         else:
             template = self._template or _SEMANTIC_COMPLETION_TEMPLATE
             actual_prompt = template.format(instruction=instruction, text=text)
-
-        instance = _make_instance("generate_until", {}, (actual_prompt, gen_kwargs), 0)
-        result = _call_model(self._model, "generate_until", [instance])
-        compressed = result[0].strip()
-        self._cache[key] = compressed
-        return compressed
+        return actual_prompt, gen_kwargs
 
     def _format_chat(self, instruction: str, text: str) -> str:
         """Build a chat-formatted prompt using the model's own chat template.

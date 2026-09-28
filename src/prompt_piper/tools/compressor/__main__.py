@@ -69,7 +69,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ---- Model -------------------------------------------------------------
     model = p.add_argument_group("model")
     model.add_argument("--model-type", metavar="TYPE",
-                       help="lm-eval model type: hf | openai | openai-chat-completions | vllm | gemini")
+                       help="lm-eval model type: hf | openai | openai-chat-completions | openai-chat | vllm | gemini | llama-cpp")
     model.add_argument("--model-name", metavar="NAME",
                        help="Model identifier (HuggingFace name, OpenAI string, …)")
     model.add_argument("--model-arg", metavar="KEY=VALUE", action="append",
@@ -110,13 +110,18 @@ def _build_parser() -> argparse.ArgumentParser:
     alg.add_argument("--seed", type=int, help="Random seed")
     alg.add_argument("--subset-seed", type=int,
                      help="Seed used for dataset subset sampling")
+    alg.add_argument("--mab-reward-weight", type=float, metavar="W",
+                     help="Weight of performance in the multi_armed_bandit reward "
+                          "(the rest goes to compression; 1 = performance only)")
     alg.add_argument("--transformation-ids", metavar="ID", nargs="+",
                      help="Restrict search to specific operator IDs (e.g. O1 O3 O7)")
     alg.add_argument(
         "--baselines",
         nargs="+",
         metavar="NAME",
-        choices=["no_compression", "all_transformations", "random_search"],
+        choices=["no_compression", "all_transformations", "random_search",
+                 "multi_armed_bandit", "summarization", "truncated_prompt",
+                 "random_deletion", "llmlingua2"],
         help="Baselines to run alongside the search",
     )
     alg.add_argument("--no-llm-semantic", action="store_true",
@@ -226,6 +231,7 @@ def _build_config(args: argparse.Namespace) -> CompressorConfig:
         "n_gen": args.n_gen,
         "seed": args.seed,
         "subset_seed": args.subset_seed,
+        "mab_reward_weight": args.mab_reward_weight,
         "transformation_ids": args.transformation_ids,
         "baselines": args.baselines,
         "use_llm_for_semantic": (

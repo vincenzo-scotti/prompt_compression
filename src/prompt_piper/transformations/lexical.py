@@ -70,12 +70,20 @@ def _load_stopwords() -> frozenset[str]:
     Falls back to a small built-in set when NLTK data cannot be obtained
     (e.g. in air-gapped environments).
     """
+    global STOPWORD_SOURCE
     try:
         _ensure_nltk_resource("corpora/stopwords", "stopwords")
         from nltk.corpus import stopwords
+        STOPWORD_SOURCE = "nltk-english"
         return frozenset(stopwords.words("english"))
-    except Exception:
+    except Exception as exc:
         # Minimal fallback so the transformation still works without NLTK data.
+        # O3 then behaves differently, so make it visible (recorded in run logs).
+        import logging
+        logging.getLogger(__name__).warning(
+            "NLTK stopwords unavailable (%s); O3 uses the small built-in fallback list.", exc
+        )
+        STOPWORD_SOURCE = "builtin-fallback"
         return frozenset(
             {
                 "a", "an", "the",
@@ -95,6 +103,8 @@ def _load_stopwords() -> frozenset[str]:
         )
 
 
+#: Which stopword list O3 uses: "nltk-english" or "builtin-fallback".
+STOPWORD_SOURCE = "unknown"
 _STOPWORDS: frozenset[str] = _load_stopwords()
 
 class RemoveStopwords(Transformation):

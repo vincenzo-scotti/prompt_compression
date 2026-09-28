@@ -276,18 +276,27 @@ class DetailedEvalRunner(CompressorRunner):
         if run_cfg.use_fitting:
             search_dataset = self._get_dataset(backend, run_cfg, split=run_cfg.search_split)
             semantic_backend = backend.get("semantic_backend")
-            fitted, _ = self._run_fitting(run_cfg, search_dataset, semantic_backend)
+            search_idx, _ = self._split_indices(run_cfg, len(search_dataset), len(search_dataset))
+            fitted, _ = self._run_fitting(
+                run_cfg, [search_dataset[i] for i in search_idx], semantic_backend,
+            )
             factory = self._compose_factory(fitted, semantic_backend)
 
         return backend, evaluator, tokenizer, factory
 
     def _load_test_dataset(self, backend: dict, run_cfg: RunConfig) -> list[dict]:
-        """Load and sub-sample the test split exactly as the original runner did."""
+        """Load and sub-sample the test split exactly as the compressor does.
+
+        Uses :meth:`CompressorRunner._split_indices`, so the test sample is
+        disjoint from the search sample when both come from the same split.
+        """
         dataset = self._get_dataset(backend, run_cfg, split=run_cfg.test_split)
-        if run_cfg.n_test is not None and run_cfg.n_test < len(dataset):
-            rng = random.Random(run_cfg.subset_seed + 1)
-            dataset = rng.sample(dataset, run_cfg.n_test)
-        return dataset
+        if run_cfg.search_split == run_cfg.test_split:
+            n_search_total = len(dataset)
+        else:
+            n_search_total = len(self._get_dataset(backend, run_cfg, split=run_cfg.search_split))
+        _, test_idx = self._split_indices(run_cfg, n_search_total, len(dataset))
+        return [dataset[i] for i in test_idx]
 
 
 # ---------------------------------------------------------------------------

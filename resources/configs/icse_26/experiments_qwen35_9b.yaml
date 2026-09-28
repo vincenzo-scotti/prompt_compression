@@ -4,8 +4,11 @@
 # peak VRAM under ~6 GB, allowing larger batch sizes than the MoE variants.
 #
 # Chat template: required for Qwen3 instruction-tuned models.
-# Few-shot formatting: fewshot_as_multiturn=true encodes each demonstration as
-# a separate (user, assistant) turn — the recommended setup for chat-tuned models.
+# Few-shot formatting: the whole assembled prompt (instruction, few-shot
+# examples, question) is sent as ONE user turn wrapped in the chat template.
+# Multi-turn few-shot formatting is not supported: the examples are a text
+# section that the operators compress.  (The published runs had
+# fewshot_as_multiturn: true, which had no effect on what was sent.)
 # Stop sequence: Qwen3 uses <|im_end|> as end-of-turn token.
 #
 # Task-specific settings (num_fewshot, compress_field, generation_kwargs)
@@ -43,10 +46,9 @@ output:
   overwrite: false
 
 defaults:
-  # Qwen3 is an instruct model; apply the chat template and format few-shot
-  # examples as multi-turn conversation turns.
+  # Qwen3 is an instruct model; apply the chat template (single user turn).
   apply_chat_template: true
-  fewshot_as_multiturn: true
+  fewshot_as_multiturn: false  # true is not supported (see header)
 
   use_fitting: true
   use_llm_for_semantic: true

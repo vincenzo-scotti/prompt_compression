@@ -44,6 +44,24 @@ class Evaluator(abc.ABC):
             for o, c, s in zip(originals, compresseds, samples)
         ]
 
+    def evaluate_batch_detailed(
+        self,
+        originals: list[str],
+        compresseds: list[str],
+        samples: list[dict],
+    ) -> list[dict]:
+        """Score a batch and return one detail dict per sample.
+
+        Every dict has at least ``"score"``.  Evaluators backed by a model
+        should also return what is needed to recompute the score offline
+        (e.g. ``"output"``, ``"filtered"``, ``"metrics"``, ``"error"``).
+        The default implementation wraps :meth:`evaluate_batch`.
+        """
+        return [
+            {"score": float(s)}
+            for s in self.evaluate_batch(originals, compresseds, samples)
+        ]
+
     def __call__(self, original: str, compressed: str, sample: dict) -> float:
         return self.evaluate(original, compressed, sample)
 

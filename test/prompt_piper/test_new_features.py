@@ -416,3 +416,66 @@ class TestBitsToIds:
     def test_empty_classes_returns_empty(self):
         from prompt_piper.tools.compressor.runner import _bits_to_ids
         assert _bits_to_ids([], []) == []
+
+# ---------------------------------------------------------------------------
+# MAB scalarized reward
+# ---------------------------------------------------------------------------
+
+class TestMABScalarizedReward:
+
+    def _problem(self):
+        exp = Experiment(config=_make_config(), dataset=_make_dataset(), evaluator=MockEvaluator())
+        return exp._build_problem(exp._sample_subset())
+
+    def test_reward_combines_performance_and_compression(self):
+        from prompt_piper.optimization.baselines import MultiArmedBanditBaseline
+        mab = MultiArmedBanditBaseline(reward_weight=0.25)
+        reward, compression = mab.reward(avg_tokens=60.0, avg_perf=0.8, reference_tokens=100.0)
+        assert compression == pytest.approx(0.4)
+        assert reward == pytest.approx(0.25 * 0.8 + 0.75 * 0.4)
+        # Compression is clipped to [0, 1].
+        assert mab.reward(120.0, 0.8, 100.0)[1] == 0.0
+
+    def test_reward_weight_one_is_performance_only(self):
+        from prompt_piper.optimization.baselines import MultiArmedBanditBaseline
+        assert MultiArmedBanditBaseline(reward_weight=1.0).reward(10.0, 0.7, 100.0)[0] == pytest.approx(0.7)
+
+    def test_invalid_reward_weight_rejected(self):
+        from prompt_piper.optimization.baselines import MultiArmedBanditBaseline
+        with pytest.raises(ValueError):
+            MultiArmedBanditBaseline(reward_weight=1.5)
+
+    def test_reference_tokens_match_no_compression(self):
+        problem = self._problem()
+        tokens, _ = problem.score_solution(np.zeros(problem.n_var, dtype=int))
+        assert problem.reference_tokens() == pytest.approx(tokens)
+
+    def test_rounds_log_parameter_evolution(self):
+        from prompt_piper.optimization.baselines import MultiArmedBanditBaseline
+        problem = self._problem()
+        states = []
+        problem.log_state = lambda kind, payload: states.append((kind, payload))
+        mab = MultiArmedBanditBaseline(n_evaluations=6, seed=0, reward_weight=0.5)
+        mab.run(problem)
+        rounds = [p for k, p in states if k == "mab_round"]
+        assert [r["round"] for r in rounds] == list(range(1, 7))
+        for prev, r in zip([None] + rounds[:-1], rounds):
+            if prev is not None:
+                assert r["alpha_before"] == prev["alpha_after"]
+                assert r["beta_before"] == prev["beta_after"]
+            expected, _ = mab.reward(r["avg_tokens"], r["avg_performance"], r["reference_tokens"])
+            assert r["reward"] == pytest.approx(expected)
+            for j, bit in enumerate(r["bits"]):
+                da = r["alpha_after"][j] - r["alpha_before"][j]
+                db = r["beta_after"][j] - r["beta_before"][j]
+                if bit:
+                    assert da == pytest.approx(r["reward"]) and db == pytest.approx(1 - r["reward"])
+                else:
+                    assert da == 0 and db == 0
+
+    def test_config_weight_reaches_baseline(self):
+        cfg = _make_config()
+        cfg.mab_reward_weight = 0.3
+        exp = Experiment(config=cfg, dataset=_make_dataset(), evaluator=MockEvaluator())
+        result = exp.run_baseline("multi_armed_bandit")
+        assert result.config["reward_weight"] == 0.3

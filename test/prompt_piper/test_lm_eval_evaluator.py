@@ -106,11 +106,11 @@ class TestApplyFilterListGSM8K:
         assert result[0] == "18"
 
     def test_gsm8k_strict_match_fails_on_natural_language(self):
-        """Model output without #### — strict-match falls back to raw text."""
+        """Model output without #### — strict-match returns lm-eval's "[invalid]"."""
         task = _make_task(filter_list=GSM8K_FILTER_LIST)
         ev = _make_evaluator(task=task)
         result = ev._apply_filter_list(GSM8K_NATURAL, task)
-        assert result[0] == GSM8K_NATURAL   # fallback: no #### found
+        assert result[0] == "[invalid]"     # lm-eval RegexFilter fallback: no #### found
 
     def test_gsm8k_flexible_extract_picks_last_number(self):
         """flexible-extract uses group_select=-1 → last number in text."""

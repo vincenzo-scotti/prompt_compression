@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import random
 import time
 from dataclasses import dataclass, field
@@ -30,6 +31,26 @@ from .config import ExperimentConfig
 from .evaluator import Evaluator, MockEvaluator
 from .problem import PromptCompressionProblem
 from .tokenizer import Tokenizer, WhitespaceTokenizer
+
+def sample_indices(
+    n_total: int,
+    n: int | None,
+    seed: int,
+    exclude=(),
+) -> list[int]:
+    """Reproducibly sample *n* indices from ``range(n_total)`` minus *exclude*.
+
+    With an empty *exclude* this draws exactly the same indices as
+    ``random.Random(seed).sample(dataset, n)`` on a dataset of length
+    *n_total*, so existing search subsets are unchanged.  When *n* is
+    ``None`` or not smaller than the pool, the whole pool is returned in order.
+    """
+    excluded = set(exclude)
+    pool = [i for i in range(n_total) if i not in excluded]
+    if n is None or n >= len(pool):
+        return pool
+    return random.Random(seed).sample(pool, n)
+
 
 _BASELINE_REGISTRY = {
     "no_compression": NoCompressionBaseline,
@@ -179,16 +200,25 @@ class Experiment:
         tokenizer: Tokenizer | None = None,
         transformations: list[type[Transformation]] | None = None,
         transformation_factory=None,
+        recorder=None,
     ) -> None:
         self.config = config
+        #: Optional :class:`~prompt_piper.optimization.recorder.RunRecorder`
+        #: that receives every evaluation, candidate and phase timing.
+        self.recorder = recorder
+        #: Indices (into *dataset*) of the search subset; set by :meth:`_sample_subset`.
+        self.search_indices: list[int] | None = None
+        #: Evaluation cache shared by every problem built by this experiment
+        #: (see ``PromptCompressionProblem(shared_cache=...)``).
+        self._shared_eval_cache: dict = {}
         self._full_dataset = dataset
         self._evaluator = evaluator or MockEvaluator()
         self._tokenizer = tokenizer or WhitespaceTokenizer()
-        # Full operator pool (filtered by transformation_ids) — used by
-        # all_transformations and summarization baselines.
+        # Full operator pool (filtered by transformation_ids) — used by the
+        # summarization baseline (it needs the semantic operators O23–O28).
         self._transform_classes = self._resolve_transformations(transformations)
         # Search-only pool (further filtered by search_transformation_ids) — used
-        # by NSGA-II, random_search, and multi_armed_bandit.
+        # by NSGA-II, random_search, multi_armed_bandit and all_transformations.
         self._search_transform_classes = self._resolve_search_transformations()
         self._transformation_factory = transformation_factory or (lambda cls: cls())
 
@@ -223,7 +253,7 @@ class Experiment:
         ExperimentResult
         """
         dataset_subset = self._sample_subset()
-        problem = self._build_problem(dataset_subset)
+        problem = self._build_problem(dataset_subset, namespace=self.config.algorithm)
 
         if self.config.algorithm == "mab":
             return self._run_mab(problem, dataset_subset, baselines)
@@ -241,12 +271,13 @@ class Experiment:
         )
         if callback is not None:
             minimize_kwargs["callback"] = callback
-        res = minimize(
-            problem,
-            algorithm,
-            ("n_gen", self.config.n_gen),
-            **minimize_kwargs,
-        )
+        with self._phase("search", method=self.config.algorithm):
+            res = minimize(
+                problem,
+                algorithm,
+                ("n_gen", self.config.n_gen),
+                **minimize_kwargs,
+            )
         elapsed = time.perf_counter() - t0
 
         pareto_solutions, pareto_objectives, pareto_names = self._parse_result(res, problem)
@@ -284,10 +315,12 @@ class Experiment:
         mab = MultiArmedBanditBaseline(
             n_evaluations=n_eval,
             seed=self.config.seed,
+            reward_weight=self.config.mab_reward_weight,
         )
 
         t0 = time.perf_counter()
-        mab_result = mab.run(problem)
+        with self._phase("search", method="mab"):
+            mab_result = mab.run(problem)
         elapsed = time.perf_counter() - t0
 
         pareto_solutions = mab_result.solutions      # (n_pareto, n_var)
@@ -314,6 +347,8 @@ class Experiment:
         self,
         solutions: np.ndarray,
         dataset: list[dict],
+        split: str = "test",
+        labels: list[str] | None = None,
     ) -> np.ndarray:
         """Score a set of binary solution vectors on an arbitrary dataset.
 
@@ -326,6 +361,11 @@ class Experiment:
             Integer array of shape ``(n_solutions, n_var)``.
         dataset:
             List of sample dicts to evaluate on.
+        split:
+            Split label attached to logged records.
+        labels:
+            Optional per-solution labels attached to logged records
+            (e.g. ``"pareto:0"``).
 
         Returns
         -------
@@ -333,10 +373,11 @@ class Experiment:
             Shape ``(n_solutions, 2)`` — columns ``[avg_tokens, avg_performance]``
             (performance is *positive*).
         """
-        problem = self._build_problem(dataset)
+        problem = self._build_problem(dataset, split=split)
         objectives = np.empty((len(solutions), 2), dtype=float)
         for i, bits in enumerate(solutions):
-            tokens, perf = problem.score_solution(bits)
+            label = labels[i] if labels is not None else f"solution:{i}"
+            tokens, perf = problem.score_solution(bits, label=label)
             objectives[i] = [tokens, perf]
         return objectives
 
@@ -364,9 +405,13 @@ class Experiment:
             problem = self._build_problem(self._sample_subset())
 
         cls = _BASELINE_REGISTRY[name]
-        if name in ("random_search", "multi_armed_bandit"):
+        if name == "random_search":
             n_eval = self.config.pop_size * self.config.n_gen
             baseline = cls(n_evaluations=n_eval, seed=self.config.seed)
+        elif name == "multi_armed_bandit":
+            n_eval = self.config.pop_size * self.config.n_gen
+            baseline = cls(n_evaluations=n_eval, seed=self.config.seed,
+                           reward_weight=self.config.mab_reward_weight)
         elif name == "random_deletion":
             baseline = cls(seed=self.config.seed)
         else:
@@ -378,9 +423,11 @@ class Experiment:
     # Internals
     # ------------------------------------------------------------------
 
-    # Baselines that must run on the full operator set (including semantic ops)
-    # so they remain meaningful even when the search is restricted to O1–O22.
-    _FULL_OP_BASELINES: frozenset[str] = frozenset({"all_transformations", "summarization"})
+    # Baselines that must run on the full operator set: summarization applies
+    # the semantic operators (O23–O28), which the search may exclude.
+    # all_transformations applies every *search* operator (O1–O22 in the paper
+    # setting), as described in the paper's Table IV.
+    _FULL_OP_BASELINES: frozenset[str] = frozenset({"summarization"})
 
     def _run_baselines(
         self,
@@ -390,24 +437,28 @@ class Experiment:
     ) -> tuple[dict[str, BaselineResult], dict[str, float]]:
         """Run all baselines, routing full-op ones to a separate problem instance.
 
-        ``all_transformations`` and ``summarization`` always use the complete
-        operator set (``_transform_classes``) so that their results are
-        independent of ``search_transformation_ids``.  All other baselines
-        share the search problem and therefore operate in the same restricted
-        operator space as NSGA-II.
+        ``summarization`` always uses the complete operator set
+        (``_transform_classes``) so that it can apply the semantic operators.
+        All other baselines, including ``all_transformations``, share the
+        search problem and therefore operate in the same operator space as
+        NSGA-II.
         """
         results: dict[str, BaselineResult] = {}
         elapsed: dict[str, float] = {}
         if not baselines:
             return results, elapsed
 
-        needs_full = any(name in self._FULL_OP_BASELINES for name in baselines)
-        full_problem = self._build_full_problem(dataset_subset) if needs_full else None
-
         for name in baselines:
             t = time.perf_counter()
-            problem = full_problem if name in self._FULL_OP_BASELINES else search_problem
-            results[name] = self.run_baseline(name, problem)
+            # A fresh problem per baseline: every method pays for all the
+            # evaluations it needs (no reuse of another method's cache).
+            problem = (
+                self._build_full_problem(dataset_subset, namespace=name)
+                if name in self._FULL_OP_BASELINES
+                else self._build_problem(dataset_subset, namespace=name)
+            )
+            with self._phase("baseline_search", method=name):
+                results[name] = self.run_baseline(name, problem)
             elapsed[name] = time.perf_counter() - t
 
         return results, elapsed
@@ -466,24 +517,57 @@ class Experiment:
         d_classes = list(all_classes) if self.config.compress_input_data else []
         return i_classes, s_classes, d_classes
 
+    def bit_layout(self, full: bool = False) -> list[dict]:
+        """Bit layout of the search problem (or of the full-operator problem)."""
+        from .bits import make_layout
+
+        classes = self._transform_classes if full else self._search_transform_classes
+        return make_layout(*self._resolve_scoped_classes(classes))
+
+    def compression_problem(self, full: bool = False) -> PromptCompressionProblem:
+        """Unlogged problem on the search subset, for compression-only analyses."""
+        if self.search_indices is None:
+            self._sample_subset()
+        data = [self._full_dataset[i] for i in self.search_indices]
+        recorder, self.recorder = self.recorder, None
+        try:
+            return self._build_full_problem(data) if full else self._build_problem(data)
+        finally:
+            self.recorder = recorder
+
     def _sample_subset(self) -> list[dict]:
-        """Draw a reproducible subset from the full dataset."""
-        n = self.config.n_subset
-        if n is None or n >= len(self._full_dataset):
-            return self._full_dataset
-        rng = random.Random(self.config.subset_seed)
-        return rng.sample(self._full_dataset, n)
+        """Draw a reproducible subset from the full dataset.
 
-    def _build_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
+        The chosen indices are stored in :attr:`search_indices`.
+        """
+        idx = sample_indices(
+            len(self._full_dataset), self.config.n_subset, self.config.subset_seed
+        )
+        self.search_indices = idx
+        return [self._full_dataset[i] for i in idx]
+
+    def _phase(self, name: str, **kwargs):
+        """Recorder phase context, or a no-op when not recording."""
+        if self.recorder is None:
+            return contextlib.nullcontext()
+        return self.recorder.phase(name, **kwargs)
+
+    def _build_problem(self, dataset: list[dict], split: str = "search",
+                       namespace: str | None = None) -> PromptCompressionProblem:
         """Build the search problem using the restricted operator set."""
-        return self._build_problem_with_classes(dataset, self._search_transform_classes)
+        return self._build_problem_with_classes(dataset, self._search_transform_classes, split, namespace)
 
-    def _build_full_problem(self, dataset: list[dict]) -> PromptCompressionProblem:
-        """Build a problem with the full operator set (for all_transformations / summarization)."""
-        return self._build_problem_with_classes(dataset, self._transform_classes)
+    def _build_full_problem(self, dataset: list[dict], split: str = "search",
+                            namespace: str | None = None) -> PromptCompressionProblem:
+        """Build a problem with the full operator set (for the summarization baseline)."""
+        return self._build_problem_with_classes(dataset, self._transform_classes, split, namespace)
 
     def _build_problem_with_classes(
-        self, dataset: list[dict], transform_classes: list[type[Transformation]]
+        self,
+        dataset: list[dict],
+        transform_classes: list[type[Transformation]],
+        split: str = "search",
+        namespace: str | None = None,
     ) -> PromptCompressionProblem:
         """Instantiate the pymoo problem using the given operator pool."""
         compress_field = self.config.compress_field or self.config.prompt_field
@@ -510,6 +594,11 @@ class Experiment:
             tokenizer=self._tokenizer,
             prompt_field=self.config.prompt_field,
             compress_field=compress_field,
+            split=split,
+            recorder=self.recorder,
+            shared_cache=self._shared_eval_cache,
+            cache_namespace=namespace,
+            preserve_answer_cue=self.config.preserve_answer_cue,
         )
 
     @staticmethod

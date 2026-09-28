@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Sequence
 
 import numpy as np
@@ -64,6 +65,28 @@ class PromptCompressionProblem(Problem):
     compress_field:
         Key inside each sample dict to apply transformations to (legacy mode
         only).  Ignored in section-aware mode.
+    split:
+        Label of the data split this problem evaluates on (``"search"``,
+        ``"test"``, …); attached to every logged record.
+    shared_cache:
+        Optional dict shared by the problems of a run, mapping
+        ``(method, source_split, sample_id, prompt)`` → ``(score, evaluation_id,
+        provider_prompt_tokens)``.  Keyed by method, so every method pays for
+        all the evaluations it needs (no method reuses another's results);
+        within a method, an identical prompt for the same sample is never
+        evaluated twice (e.g. across its search and test phases).  Used only
+        when every sample carries ``_sample_id`` and ``_split``.
+    cache_namespace:
+        Method that owns this problem's evaluations.  When ``None``, the
+        recorder's current ``method`` context is used.
+    preserve_answer_cue:
+        When ``True``, text-level baselines (:meth:`score_transform_fn`) act
+        only on instruction + shots + data and always keep the answer cue and
+        tail (e.g. MBPP's code opener) unchanged, as the operator strategies do.
+    recorder:
+        Optional :class:`~prompt_piper.optimization.recorder.RunRecorder`.
+        When set, every evaluation (including cache hits) and every scored
+        candidate is logged with its per-sample breakdown.
     """
 
     def __init__(
@@ -81,6 +104,11 @@ class PromptCompressionProblem(Problem):
         tokenizer: Tokenizer | None = None,
         prompt_field: str = "prompt",
         compress_field: str | None = None,
+        split: str = "search",
+        recorder=None,
+        shared_cache: dict | None = None,
+        cache_namespace: str | None = None,
+        preserve_answer_cue: bool = False,
     ) -> None:
         self._sections = sections
 
@@ -119,6 +147,30 @@ class PromptCompressionProblem(Problem):
         self._eval_cache: dict[tuple[int, str], float] = {}
         self._token_cache: dict[str, int] = {}
 
+        # Logging
+        self.split = split
+        self.recorder = recorder
+        #: Stable identifier of each sample in its source split (falls back to
+        #: the position in *dataset* when samples carry no ``_sample_id``).
+        self._sample_ids: list = [
+            s.get("_sample_id", j) if isinstance(s, dict) else j
+            for j, s in enumerate(self._dataset)
+        ]
+        self._eval_ids: dict[tuple[int, str], int | None] = {}
+        #: Provider-reported prompt tokens per evaluated pair (API / llama.cpp
+        #: models); ``None`` when the backend reports no usage.
+        self._provider_tokens: dict[tuple[int, str], int | None] = {}
+        if recorder is not None:
+            self._log_sections()
+        self._call_counters: dict[str, int] = {}
+        self._owned_pairs: set[tuple[int, str]] = set()
+        has_ids = bool(self._dataset) and all(
+            isinstance(s, dict) and "_sample_id" in s and "_split" in s for s in self._dataset
+        )
+        self._shared = shared_cache if has_ids else None
+        self._cache_namespace = cache_namespace
+        self.preserve_answer_cue = preserve_answer_cue
+
         super().__init__(
             n_var=n_var,
             n_obj=2,
@@ -143,68 +195,37 @@ class PromptCompressionProblem(Problem):
         2. **Within-generation deduplication**: novel pairs are collected once
            and sent to the evaluator in a single batched call.
         """
-        n_solutions = len(x)
+        per_solution = [self._compress_bits(bits) for bits in x]
+        infos = [{"bits": bits} for bits in x]
+        objectives = self._score_candidates(per_solution, infos)
 
-        # Phase 1: compress without evaluating
-        per_solution: list[tuple[list[str], list[str]]] = []
-        for bits in x:
-            originals, compressed = self._compress_bits(bits)
-            per_solution.append((originals, compressed))
-
-        # Phase 2: collect pairs not already in the cross-generation cache
-        key_to_new_idx: dict[tuple, int] = {}
-        unique_originals: list[str] = []
-        unique_compressed: list[str] = []
-        unique_docs: list[dict] = []
-
-        for originals, compressed in per_solution:
-            for j, (orig, comp) in enumerate(zip(originals, compressed)):
-                key = (j, comp)
-                if key not in self._eval_cache and key not in key_to_new_idx:
-                    key_to_new_idx[key] = len(unique_compressed)
-                    unique_originals.append(orig)
-                    unique_compressed.append(comp)
-                    unique_docs.append(self._dataset[j] if j < len(self._dataset) else {})
-
-        # Phase 3: evaluate novel pairs and populate the cross-generation cache
-        if unique_compressed:
-            new_perfs = self._evaluator.evaluate_batch(
-                unique_originals, unique_compressed, unique_docs
-            )
-            for key, idx in key_to_new_idx.items():
-                self._eval_cache[key] = new_perfs[idx]
-
-        # Phase 4: reconstruct per-solution objectives entirely from cache
-        F = np.empty((n_solutions, 2), dtype=float)
-        for i, (originals, compressed) in enumerate(per_solution):
-            n = len(originals)
-            total_tokens = sum(self._count_tokens(c) for c in compressed)
-            total_perf = sum(
-                self._eval_cache[(j, comp)]
-                for j, comp in enumerate(compressed)
-            )
-            F[i, 0] = total_tokens / n
-            F[i, 1] = -(total_perf / n)
+        F = np.empty((len(x), 2), dtype=float)
+        for i, (avg_tokens, avg_perf) in enumerate(objectives):
+            F[i, 0] = avg_tokens
+            F[i, 1] = -avg_perf
         out["F"] = F
 
     # ------------------------------------------------------------------
     # Public scoring
     # ------------------------------------------------------------------
 
-    def score_solution(self, bits: np.ndarray) -> tuple[float, float]:
+    def score_solution(self, bits: np.ndarray, label: str | None = None) -> tuple[float, float]:
         """Return ``(avg_tokens, avg_performance)`` for a binary vector.
 
-        Performance is *positive* here (not negated).
+        Performance is *positive* here (not negated).  *label* is attached to
+        the logged candidate record (e.g. ``"pareto:3"``).
         """
-        return self._score_bits(bits)
+        return self._score_bits(bits, label=label)
 
-    def score_transform_fn(self, fn) -> tuple[float, float]:
+    def score_transform_fn(self, fn, label: str | None = None) -> tuple[float, float]:
         """Score an arbitrary compression callable on the dataset.
 
         Parameters
         ----------
         fn:
             Any callable ``(text: str) -> str``.
+        label:
+            Optional label attached to the logged candidate record.
 
         Returns
         -------
@@ -216,11 +237,33 @@ class PromptCompressionProblem(Problem):
         else:
             originals = [s[self._compress_field] for s in self._dataset]
 
-        compressed_texts = [fn(t) for t in originals]
-        total_tokens = sum(self._tokenizer.count(c) for c in compressed_texts)
-        perfs = self._evaluator.evaluate_batch(originals, compressed_texts, self._dataset)
-        n = max(len(self._dataset), 1)
-        return total_tokens / n, sum(perfs) / n
+        if self.preserve_answer_cue and self._sections is not None:
+            compressed_texts = [s.with_cue(fn(s.body())) for s in self._sections]
+        else:
+            compressed_texts = [fn(t) for t in originals]
+        info = {"bits": None, "transform": getattr(fn, "__qualname__", repr(fn)), "label": label}
+        return self._score_candidates([(originals, compressed_texts)], [info])[0]
+
+    def reference_tokens(self) -> float:
+        """Average token count of the uncompressed prompts (no evaluation)."""
+        originals, _ = self._compress_bits(np.zeros(self.n_var, dtype=int))
+        return sum(self._count_tokens(t) for t in originals) / max(len(originals), 1)
+
+    def log_state(self, kind: str, payload: dict) -> None:
+        """Log an algorithm-state snapshot (e.g. MAB beliefs) if recording.
+
+        Front entries get the ``candidate_id`` of the candidate record that
+        holds their per-sample values (the averages here are the objectives).
+        """
+        if self.recorder is not None:
+            method = self.recorder.context.get("method")
+            for entry in payload.get("pareto_front", []):
+                entry["candidate_id"] = self.recorder.candidate_id(method, self.split, entry["bits"])
+            if kind == "mab_round":
+                payload = {**payload, "candidate_id": self.recorder.candidate_id(method, self.split, payload["bits"])}
+            self.recorder.write("states", {
+                **self.recorder.context, "split": self.split, "kind": kind, **payload,
+            })
 
     # ------------------------------------------------------------------
     # Internals
@@ -232,26 +275,167 @@ class PromptCompressionProblem(Problem):
             self._token_cache[text] = self._tokenizer.count(text)
         return self._token_cache[text]
 
-    def _score_bits(self, bits) -> tuple[float, float]:
-        originals, compressed = self._compress_bits(bits)
-        n = max(len(originals), 1)
-        total_tokens = sum(self._count_tokens(c) for c in compressed)
+    def _score_bits(self, bits, label: str | None = None) -> tuple[float, float]:
+        return self._score_candidates(
+            [self._compress_bits(bits)], [{"bits": bits, "label": label}]
+        )[0]
 
-        new_j, new_orig, new_comp, new_docs = [], [], [], []
-        for j, (orig, comp) in enumerate(zip(originals, compressed)):
-            if (j, comp) not in self._eval_cache:
-                new_j.append(j)
-                new_orig.append(orig)
-                new_comp.append(comp)
-                new_docs.append(self._dataset[j] if j < len(self._dataset) else {})
+    def _score_candidates(
+        self,
+        per_candidate: list[tuple[list[str], list[str]]],
+        infos: list[dict],
+    ) -> list[tuple[float, float]]:
+        """Score candidates with cross-call caching and complete logging.
 
-        if new_comp:
-            new_perfs = self._evaluator.evaluate_batch(new_orig, new_comp, new_docs)
-            for j, comp, perf in zip(new_j, new_comp, new_perfs):
-                self._eval_cache[(j, comp)] = perf
+        Two layers of deduplication are applied:
 
-        total_perf = sum(self._eval_cache[(j, comp)] for j, comp in enumerate(compressed))
-        return total_tokens / n, total_perf / n
+        1. **Cross-call cache** (``_eval_cache``): any (sample_index,
+           compressed_text) pair whose score is already known is skipped
+           entirely.  This eliminates redundant LLM calls across generations
+           when solutions converge to the same compressed output.
+        2. **Within-call deduplication**: novel pairs are collected once and
+           sent to the evaluator in a single batched call.
+
+        Returns ``[(avg_tokens, avg_performance), ...]`` (performance positive).
+        """
+        rec = self.recorder
+        method = rec.context.get("method", "unknown") if rec is not None else "unknown"
+        call_index = self._call_counters.get(method, 0) + 1
+        self._call_counters[method] = call_index
+        t_call = time.perf_counter()
+
+        # Collect pairs not already in the cross-call cache
+        key_to_new_idx: dict[tuple, int] = {}
+        new_keys: list[tuple[int, str]] = []
+        new_originals: list[str] = []
+        new_docs: list[dict] = []
+        for originals, compressed in per_candidate:
+            for j, (orig, comp) in enumerate(zip(originals, compressed)):
+                key = (j, comp)
+                if key not in self._eval_cache and self._shared is not None:
+                    hit = self._shared.get(self._shared_key(j, comp))
+                    if hit is not None:
+                        self._eval_cache[key], self._eval_ids[key], self._provider_tokens[key] = hit
+                if key not in self._eval_cache and key not in key_to_new_idx:
+                    key_to_new_idx[key] = len(new_keys)
+                    new_keys.append(key)
+                    new_originals.append(orig)
+                    new_docs.append(self._dataset[j] if j < len(self._dataset) else {})
+
+        # Evaluate novel pairs, log them, and populate the cache
+        if new_keys:
+            t0 = time.perf_counter()
+            details = self._evaluator.evaluate_batch_detailed(
+                new_originals, [c for _, c in new_keys], new_docs
+            )
+            batch_elapsed = time.perf_counter() - t0
+            batch_id = rec.next_id("batches") if rec is not None else None
+            for (key, orig, doc), detail in zip(zip(new_keys, new_originals, new_docs), details):
+                self._eval_cache[key] = float(detail["score"])
+                usage = detail.get("provider_usage") or {}
+                self._provider_tokens[key] = usage.get("prompt_tokens")
+                self._eval_ids[key] = self._log_evaluation(
+                    key, orig, doc, detail, batch_id, len(new_keys), batch_elapsed,
+                ) if rec is not None else None
+                if self._shared is not None:
+                    self._shared[self._shared_key(*key)] = (
+                        self._eval_cache[key], self._eval_ids[key], self._provider_tokens[key],
+                    )
+
+        # Reconstruct per-candidate objectives entirely from cache
+        results: list[tuple[float, float]] = []
+        for index, ((originals, compressed), info) in enumerate(zip(per_candidate, infos)):
+            n = max(len(originals), 1)
+            tokens = [self._count_tokens(c) for c in compressed]
+            perfs = [self._eval_cache[(j, comp)] for j, comp in enumerate(compressed)]
+            avg_tokens, avg_perf = sum(tokens) / n, sum(perfs) / n
+            results.append((avg_tokens, avg_perf))
+            if rec is not None:
+                self._log_candidate(
+                    info, call_index, index, compressed, tokens, perfs, key_to_new_idx,
+                    avg_tokens, avg_perf, time.perf_counter() - t_call,
+                )
+        return results
+
+    def _shared_key(self, j: int, comp: str) -> tuple:
+        namespace = self._cache_namespace
+        if namespace is None and self.recorder is not None:
+            namespace = self.recorder.context.get("method")
+        return (namespace, self._dataset[j]["_split"], self._dataset[j]["_sample_id"], comp)
+
+    def _log_evaluation(self, key, original, doc, detail, batch_id, batch_size, batch_elapsed) -> int:
+        rec = self.recorder
+        j, comp = key
+        eval_id = rec.next_id("evaluations")
+        record = {
+            **rec.context,
+            "id": eval_id,
+            "split": self.split,
+            "sample_index": j,
+            "sample_id": self._sample_ids[j] if j < len(self._sample_ids) else j,
+            "target": doc.get("target") if isinstance(doc, dict) else None,
+            "original_sha": rec.store_text(original),
+            "prompt_sha": rec.store_text(comp),
+            "original_tokens": self._count_tokens(original),
+            "input_tokens": self._count_tokens(comp),
+            "batch_id": batch_id,
+            "batch_size": batch_size,
+            "batch_elapsed_seconds": batch_elapsed,
+        }
+        for k, v in detail.items():
+            record[k] = v
+        output = detail.get("output")
+        if isinstance(output, str):
+            record["output_tokens"] = self._tokenizer.count(output)
+        rec.write("evaluations", record)
+        return eval_id
+
+    def _log_candidate(self, info, call_index, index, compressed, tokens, perfs,
+                       new_keys, avg_tokens, avg_perf, elapsed) -> None:
+        rec = self.recorder
+        bits = info.get("bits")
+        per_sample = []
+        n_hits = 0
+        for j, (comp, tok, perf) in enumerate(zip(compressed, tokens, perfs)):
+            key = (j, comp)
+            # The first candidate using a pair evaluated in this call "owns"
+            # the evaluation; every other use (earlier calls, or duplicates
+            # within this call) is a cache hit.
+            cached = key not in new_keys or key in self._owned_pairs
+            if not cached:
+                self._owned_pairs.add(key)
+            n_hits += cached
+            per_sample.append({
+                "sample_index": j,
+                "sample_id": self._sample_ids[j] if j < len(self._sample_ids) else j,
+                "eval_id": self._eval_ids.get(key),
+                "prompt_sha": rec.store_text(comp),
+                "tokens": tok,
+                "provider_prompt_tokens": self._provider_tokens.get(key),
+                "score": perf,
+                "cached": cached,
+            })
+        candidate_id = rec.next_id("candidates")
+        if bits is not None:
+            rec.register_candidate(rec.context.get("method"), self.split, bits, candidate_id)
+        rec.write("candidates", {
+            **rec.context,
+            "id": candidate_id,
+            "split": self.split,
+            "call_index": call_index,
+            "index_in_call": index,
+            "label": info.get("label"),
+            "bits": [int(b) for b in bits] if bits is not None else None,
+            "transformation_names": self.names_from_bits(bits) if bits is not None else None,
+            "transform": info.get("transform"),
+            "n_samples": len(compressed),
+            "avg_tokens": avg_tokens,
+            "avg_performance": avg_perf,
+            "n_new_evaluations": len(compressed) - n_hits,
+            "n_cache_hits": n_hits,
+            "elapsed_seconds_since_call_start": elapsed,
+            "per_sample": per_sample,
+        })
 
     # ---------- Compression (no evaluation) ----------
 
@@ -280,12 +464,15 @@ class PromptCompressionProblem(Problem):
         shots_bits = tuple(int(b) for b in bits[n_i:n_i + n_s])
         data_bits = list(bits[n_i + n_s:])
 
-        c_instr, c_shots = self._get_static_compressed(instruction_bits, shots_bits)
-
         data_pipeline = [op for op, b in zip(self._data_ops, data_bits) if b]
         compressed_texts: list[str] = []
         originals: list[str] = []
         for section in self._sections:  # type: ignore[union-attr]
+            # Each sample's own instruction/shots are compressed; identical
+            # texts (the usual static case) hit the cache and are compressed once.
+            c_instr, c_shots = self._get_static_compressed(
+                instruction_bits, shots_bits, section.instruction, section.shots,
+            )
             c_data = section.input_data
             for op in data_pipeline:
                 c_data = op(c_data)
@@ -302,9 +489,19 @@ class PromptCompressionProblem(Problem):
         self,
         instruction_bits: tuple,
         shots_bits: tuple,
+        base_instruction: str | None = None,
+        base_shots: str | None = None,
     ) -> tuple[str, str]:
-        """Return ``(compressed_instruction, compressed_shots)`` from cache."""
-        static_key = (instruction_bits, shots_bits)
+        """Return ``(compressed_instruction, compressed_shots)`` from cache.
+
+        Keyed by the bits *and* the texts, so samples whose instruction or shots
+        differ are never given another sample's text.
+        """
+        if base_instruction is None:
+            base_instruction = self._sections[0].instruction if self._sections else ""  # type: ignore[index]
+        if base_shots is None:
+            base_shots = self._sections[0].shots if self._sections else ""  # type: ignore[index]
+        static_key = (instruction_bits, shots_bits, base_instruction, base_shots)
         if static_key not in self._static_cache:
             instr_pipeline = [
                 op for op, b in zip(self._instruction_ops, instruction_bits) if b
@@ -312,8 +509,6 @@ class PromptCompressionProblem(Problem):
             shot_pipeline = [
                 op for op, b in zip(self._shot_ops, shots_bits) if b
             ]
-            base_instruction = self._sections[0].instruction if self._sections else ""  # type: ignore[index]
-            base_shots = self._sections[0].shots if self._sections else ""  # type: ignore[index]
             c_instr = base_instruction
             for op in instr_pipeline:
                 c_instr = op(c_instr)
@@ -326,6 +521,64 @@ class PromptCompressionProblem(Problem):
     # ------------------------------------------------------------------
     # Helpers for baselines / runner
     # ------------------------------------------------------------------
+
+    def effective_bits(self, bits) -> list[int]:
+        """Indices of active bits whose removal changes at least one prompt.
+
+        A bit that is set but changes no prompt (on this problem's samples,
+        given the other active bits) is neutral: the search cannot have
+        selected it for its effect.  Compression only; no model calls.
+        """
+        bits = [int(b) for b in bits]
+        _, base = self._compress_bits(bits)
+        effective = []
+        for i, b in enumerate(bits):
+            if b:
+                flipped = list(bits)
+                flipped[i] = 0
+                if self._compress_bits(flipped)[1] != base:
+                    effective.append(i)
+        return effective
+
+    def noop_bits(self) -> list[int]:
+        """Indices of bits that change no prompt when applied alone."""
+        _, base = self._compress_bits([0] * self.n_var)
+        out = []
+        for i in range(self.n_var):
+            bits = [0] * self.n_var
+            bits[i] = 1
+            if self._compress_bits(bits)[1] == base:
+                out.append(i)
+        return out
+
+    def bit_layout(self) -> list[dict]:
+        """Return the bit layout: one ``{index, section, op_id, op_name}`` per bit."""
+        from .bits import make_flat_layout, make_layout
+
+        if self._sections is None:
+            return make_flat_layout(self._transforms)
+        return make_layout(self._instruction_ops, self._shot_ops, self._data_ops)
+
+    def _log_sections(self) -> None:
+        """Log each sample's uncompressed sections once per split and sample."""
+        rec = self.recorder
+        logged = rec.__dict__.setdefault("_logged_sections", set())
+        for j, sample in enumerate(self._dataset):
+            key = (self.split, self._sample_ids[j])
+            if key in logged:
+                continue
+            logged.add(key)
+            record = {"split": self.split, "sample_index": j, "sample_id": self._sample_ids[j]}
+            if self._sections is not None:
+                sec = self._sections[j]
+                record.update(
+                    instruction=sec.instruction, shots=sec.shots,
+                    input_data=sec.input_data, output_cue=sec.output_cue,
+                    assembled_sha=rec.store_text(sec.assemble()),
+                )
+            else:
+                record["compress_field_sha"] = rec.store_text(sample[self._compress_field])
+            rec.write("sections", record)
 
     def names_from_bits(self, bits) -> list[str]:
         """Return human-readable names for the active operators in *bits*."""
