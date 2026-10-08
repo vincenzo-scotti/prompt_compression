@@ -32,7 +32,7 @@ mkdir -p logs
 if [ -z "${PP_INHIBITED:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
     export PP_INHIBITED=1
     exec systemd-inhibit --what=sleep:idle --who=prompt_piper \
-        --why="PromptPiper experiments running" bash "$0" "$@"
+        --why="PromptPiper experiments running" bash "${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")" "$@"
 fi
 
 DRY=0
