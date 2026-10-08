@@ -14,6 +14,8 @@ model:
   name: gemini-3.1-flash-lite
   kwargs:
     num_concurrent: 4
+    timeout: 900             # seconds per request (lm-eval default 300)
+    max_retries: 10          # lm-eval default 3
     # Minimum thinking (cannot be disabled on Gemini 3.x).
     reasoning_effort: minimal
 

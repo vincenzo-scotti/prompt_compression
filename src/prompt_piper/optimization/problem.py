@@ -574,6 +574,9 @@ class PromptCompressionProblem(Problem):
                 record.update(
                     instruction=sec.instruction, shots=sec.shots,
                     input_data=sec.input_data, output_cue=sec.output_cue,
+                    sep_after_instruction=sec.sep_after_instruction,
+                    sep_after_shots=sec.sep_after_shots,
+                    sep_before_cue=sec.sep_before_cue, tail=sec.tail,
                     assembled_sha=rec.store_text(sec.assemble()),
                 )
             else:

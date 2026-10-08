@@ -60,7 +60,7 @@ tasks:
     test_split: test
     n_search: 15
     generation_kwargs:
-      max_gen_toks: 512
+      max_gen_toks: 2048   # raised from 512 (2026-10-08): smoke test showed 9–34% of answers truncated
     instruction_prefix: |
       You are an expert Python programmer. Your task is to implement a Python
       function that satisfies the given specification and passes all provided
@@ -88,7 +88,7 @@ tasks:
     search_split: test
     test_split: test
     generation_kwargs:
-      max_gen_toks: 1024
+      max_gen_toks: 2048   # raised from 1024 (2026-10-08): smoke test showed 9–34% of answers truncated
     instruction_prefix: |
       You are an expert computer science assistant. You will be given a
       multiple-choice question drawn from topics including algorithms, data
@@ -117,7 +117,7 @@ tasks:
     search_split: test
     test_split: test
     generation_kwargs:
-      max_gen_toks: 1024
+      max_gen_toks: 2048   # raised from 1024 (2026-10-08): smoke test showed 9–34% of answers truncated
     instruction_prefix: |
       You are a precise mathematical reasoning assistant. You will be given a
       grade-school arithmetic word problem. Solve it step by step.
@@ -146,7 +146,7 @@ tasks:
     search_split: test
     test_split: test
     generation_kwargs:
-      max_gen_toks: 1024
+      max_gen_toks: 2048   # raised from 1024 (2026-10-08): smoke test showed 9–34% of answers truncated
     instruction_prefix: |
       You are a logical reasoning assistant. You will be given a set of clues
       that constrain the relative order of seven named objects or entities.

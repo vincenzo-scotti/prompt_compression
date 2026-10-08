@@ -1082,11 +1082,17 @@ i      ``process_results`` metric.
             and "until" in self._gen_kwargs
             and (_is_chat_model(self._model) or apply_chat_template)
         ):
-            _stripped = [s for s in self._gen_kwargs["until"] if s not in ("\n", "\n\n")]
+            # The task's stop sequences delimit few-shot *completions* (e.g. BBH's
+            # "Q", GSM8K's "Q:", MMLU-Pro's "Question:").  A chat model answers in
+            # its own turn and ends at end-of-turn, so these stops only truncate
+            # answers (BBH: any word starting with "Q", e.g. "Quail").  Keep only
+            # stop sequences given explicitly via extra_stop_sequences.
+            explicit = set(extra_stop_sequences or [])
+            _stripped = [s for s in self._gen_kwargs["until"] if s in explicit]
             if len(_stripped) != len(self._gen_kwargs["until"]):
                 logger.info(
-                    "LMEvalEvaluator: stripped newline stop sequences for chat model "
-                    "(remaining: %r). Pass generation_kwargs={'until': [...]} to override.",
+                    "LMEvalEvaluator: dropped the task's few-shot stop sequences for a chat "
+                    "model (kept: %r). Pass generation_kwargs={'until': [...]} to override.",
                     _stripped,
                 )
             self._gen_kwargs = {**self._gen_kwargs, "until": _stripped}

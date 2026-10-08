@@ -17,6 +17,8 @@ model:
     # gpt-5.4-nano does not support the 'stop' parameter.
     drop_stop_sequences: true
     num_concurrent: 4
+    timeout: 900             # seconds per request (lm-eval default 300)
+    max_retries: 10          # lm-eval default 3
     # No reasoning (documented default for gpt-5.4-nano; sent explicitly).
     reasoning_effort: none
 

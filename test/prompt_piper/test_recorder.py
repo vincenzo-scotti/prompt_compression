@@ -481,3 +481,15 @@ def test_preserve_answer_cue_option():
         p._evaluator.evaluate_batch_detailed = lambda o, c, s: captured.extend(c) or [{"score": 0.0}] * len(c)
         p.score_transform_fn(cut)
         assert captured == texts
+
+
+def test_sections_log_rebuilds_prompts_exactly(tmp_path):
+    from prompt_piper.transformations.sections import PromptSections
+
+    TestDryRunLogging()._run(tmp_path)
+    log_dir = tmp_path / "dry_log"
+    texts = {t["sha"]: t["text"] for t in _read(log_dir / "texts.jsonl")}
+    fields = ("instruction", "shots", "input_data", "output_cue", "sep_after_instruction",
+              "sep_after_shots", "sep_before_cue", "tail")
+    for r in _read(log_dir / "sections.jsonl"):
+        assert PromptSections(**{k: r[k] for k in fields}).assemble() == texts[r["assembled_sha"]]

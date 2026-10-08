@@ -126,6 +126,7 @@ class RunRecorder:
     def phase(self, name: str, **kwargs) -> Iterator[None]:
         """Time a phase and attach ``phase=name`` to records emitted inside it."""
         start = time.perf_counter()
+        wall_start = time.time()
         started = _now()
         self.write("phases", {"event": "start", "phase": name, "time": started, **kwargs})
         with self.scope(phase=name, **kwargs):
@@ -134,7 +135,10 @@ class RunRecorder:
             finally:
                 self.write("phases", {
                     "event": "end", "phase": name, "start_time": started, "time": _now(),
-                    "elapsed_seconds": time.perf_counter() - start, **kwargs,
+                    # Monotonic time excludes system suspension; wall-clock time
+                    # includes it, so a difference reveals a suspended machine.
+                    "elapsed_seconds": time.perf_counter() - start,
+                    "wall_elapsed_seconds": time.time() - wall_start, **kwargs,
                 })
 
     # ------------------------------------------------------------------

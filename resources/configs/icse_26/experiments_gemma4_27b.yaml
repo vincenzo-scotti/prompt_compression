@@ -22,6 +22,8 @@ model:
     llama_swap: true
     disable_thinking: true
     num_concurrent: 4        # adjust to the server's --parallel slots
+    timeout: 900             # seconds per request (lm-eval default 300)
+    max_retries: 10          # lm-eval default 3
 
 output:
   dir: ./results/icse_26_final/gemma4-26b-a4b-it

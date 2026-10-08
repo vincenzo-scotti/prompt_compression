@@ -160,3 +160,17 @@ def test_base_url_resolution(monkeypatch, caplog):
     m = _load_model("llama-cpp", "qwen3.5-9b", llama_swap=True)
     assert m.base_url == "http://swap:9292/v1/chat/completions"
     assert m.tokenize_url == "http://swap:9292/upstream/qwen3.5-9b/tokenize"
+
+
+def test_chat_model_drops_task_fewshot_stops(model):
+    import types
+    from prompt_piper.backends.lm_eval import LMEvalEvaluator
+
+    task = types.SimpleNamespace(
+        OUTPUT_TYPE="generate_until",
+        config=types.SimpleNamespace(generation_kwargs={"max_gen_toks": 1024, "until": ["</s>", "Q"]}),
+    )
+    ev = LMEvalEvaluator(model, task)
+    assert "until" not in ev._gen_kwargs          # BBH's "Q" would cut "Quail"
+    ev2 = LMEvalEvaluator(model, task, extra_stop_sequences=["<|im_end|>"])
+    assert ev2._gen_kwargs["until"] == ["<|im_end|>"]  # explicit stops are kept

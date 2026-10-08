@@ -25,6 +25,14 @@ fi
 export HF_ALLOW_CODE_EVAL=1
 mkdir -p logs
 
+# Keep the machine awake: a suspend drops open connections and stalls runs
+# that last many hours (seen in the smoke test on 2026-10-08).
+if [ -z "${PP_INHIBITED:-}" ] && command -v systemd-inhibit >/dev/null 2>&1; then
+    export PP_INHIBITED=1
+    exec systemd-inhibit --what=sleep:idle --who=prompt_piper \
+        --why="PromptPiper experiments running" bash "$0" "$@"
+fi
+
 DRY=0
 for arg in "$@"; do [ "${arg}" = "--dry-run" ] && DRY=1; done
 
