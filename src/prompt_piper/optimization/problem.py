@@ -79,6 +79,14 @@ class PromptCompressionProblem(Problem):
     cache_namespace:
         Method that owns this problem's evaluations.  When ``None``, the
         recorder's current ``method`` context is used.
+    replay:
+        Optional :class:`~prompt_piper.optimization.recorder.ReplayStore` with
+        evaluations from interrupted runs; matching evaluations are reused
+        instead of calling the model (crash recovery).
+    eval_chunk_size:
+        Maximum number of model requests sent (concurrently) per evaluator call.
+        Each chunk is logged as soon as it returns, so a crash loses at most
+        one chunk of paid-but-unlogged requests.
     preserve_answer_cue:
         When ``True``, text-level baselines (:meth:`score_transform_fn`) act
         only on instruction + shots + data and always keep the answer cue and
@@ -109,6 +117,8 @@ class PromptCompressionProblem(Problem):
         shared_cache: dict | None = None,
         cache_namespace: str | None = None,
         preserve_answer_cue: bool = False,
+        replay=None,
+        eval_chunk_size: int = 64,
     ) -> None:
         self._sections = sections
 
@@ -170,6 +180,8 @@ class PromptCompressionProblem(Problem):
         self._shared = shared_cache if has_ids else None
         self._cache_namespace = cache_namespace
         self.preserve_answer_cue = preserve_answer_cue
+        self.replay = replay
+        self.eval_chunk_size = max(1, int(eval_chunk_size))
 
         super().__init__(
             n_var=n_var,
@@ -322,25 +334,37 @@ class PromptCompressionProblem(Problem):
                     new_originals.append(orig)
                     new_docs.append(self._dataset[j] if j < len(self._dataset) else {})
 
-        # Evaluate novel pairs, log them, and populate the cache
+        # Evaluate novel pairs, log them, and populate the cache.  Pairs already
+        # evaluated in an interrupted run are replayed from its log (crash
+        # recovery); only the rest are sent to the model.
         if new_keys:
-            t0 = time.perf_counter()
-            details = self._evaluator.evaluate_batch_detailed(
-                new_originals, [c for _, c in new_keys], new_docs
-            )
-            batch_elapsed = time.perf_counter() - t0
-            batch_id = rec.next_id("batches") if rec is not None else None
-            for (key, orig, doc), detail in zip(zip(new_keys, new_originals, new_docs), details):
-                self._eval_cache[key] = float(detail["score"])
-                usage = detail.get("provider_usage") or {}
-                self._provider_tokens[key] = usage.get("prompt_tokens")
-                self._eval_ids[key] = self._log_evaluation(
-                    key, orig, doc, detail, batch_id, len(new_keys), batch_elapsed,
-                ) if rec is not None else None
-                if self._shared is not None:
-                    self._shared[self._shared_key(*key)] = (
-                        self._eval_cache[key], self._eval_ids[key], self._provider_tokens[key],
-                    )
+            replayed: dict[int, tuple] = {}
+            if self.replay is not None and rec is not None:
+                ns = self._namespace()
+                for i, (j, comp) in enumerate(new_keys):
+                    hit = self.replay.lookup(ns, self.split, self._sample_ids[j], comp)
+                    if hit is not None:
+                        replayed[i] = hit
+            to_eval = [i for i in range(len(new_keys)) if i not in replayed]
+            # Chunks are evaluated (concurrently within a chunk) and logged one
+            # at a time, so a crash loses at most one chunk of paid requests.
+            for start in range(0, len(to_eval), self.eval_chunk_size):
+                chunk = to_eval[start:start + self.eval_chunk_size]
+                t0 = time.perf_counter()
+                details = self._evaluator.evaluate_batch_detailed(
+                    [new_originals[i] for i in chunk],
+                    [new_keys[i][1] for i in chunk],
+                    [new_docs[i] for i in chunk],
+                )
+                batch_elapsed = time.perf_counter() - t0
+                batch_id = rec.next_id("batches") if rec is not None else None
+                for i, detail in zip(chunk, details):
+                    self._store_evaluation(i, new_keys, new_originals, new_docs, detail,
+                                           batch_id, len(chunk), batch_elapsed, None)
+            for i, (detail, timing, origin) in replayed.items():
+                self._store_evaluation(i, new_keys, new_originals, new_docs, detail,
+                                       None, timing["batch_size"], timing["batch_elapsed_seconds"],
+                                       origin)
 
         # Reconstruct per-candidate objectives entirely from cache
         results: list[tuple[float, float]] = []
@@ -357,13 +381,32 @@ class PromptCompressionProblem(Problem):
                 )
         return results
 
-    def _shared_key(self, j: int, comp: str) -> tuple:
+    def _namespace(self):
         namespace = self._cache_namespace
         if namespace is None and self.recorder is not None:
             namespace = self.recorder.context.get("method")
-        return (namespace, self._dataset[j]["_split"], self._dataset[j]["_sample_id"], comp)
+        return namespace
 
-    def _log_evaluation(self, key, original, doc, detail, batch_id, batch_size, batch_elapsed) -> int:
+    def _shared_key(self, j: int, comp: str) -> tuple:
+        return (self._namespace(), self._dataset[j]["_split"], self._dataset[j]["_sample_id"], comp)
+
+    def _store_evaluation(self, i, new_keys, new_originals, new_docs, detail,
+                          batch_id, batch_size, batch_elapsed, replayed_from) -> None:
+        key = new_keys[i]
+        self._eval_cache[key] = float(detail["score"])
+        usage = detail.get("provider_usage") or {}
+        self._provider_tokens[key] = usage.get("prompt_tokens")
+        self._eval_ids[key] = self._log_evaluation(
+            key, new_originals[i], new_docs[i], detail, batch_id, batch_size, batch_elapsed,
+            replayed_from=replayed_from,
+        ) if self.recorder is not None else None
+        if self._shared is not None:
+            self._shared[self._shared_key(*key)] = (
+                self._eval_cache[key], self._eval_ids[key], self._provider_tokens[key],
+            )
+
+    def _log_evaluation(self, key, original, doc, detail, batch_id, batch_size, batch_elapsed,
+                        replayed_from=None) -> int:
         rec = self.recorder
         j, comp = key
         eval_id = rec.next_id("evaluations")
@@ -384,6 +427,10 @@ class PromptCompressionProblem(Problem):
         }
         for k, v in detail.items():
             record[k] = v
+        if replayed_from is not None:
+            # Reused from an interrupted run's log: no model call was made now;
+            # the original batch timing is kept for cost accounting.
+            record["replayed_from"] = replayed_from
         output = detail.get("output")
         if isinstance(output, str):
             record["output_tokens"] = self._tokenizer.count(output)

@@ -201,11 +201,14 @@ class Experiment:
         transformations: list[type[Transformation]] | None = None,
         transformation_factory=None,
         recorder=None,
+        replay=None,
     ) -> None:
         self.config = config
         #: Optional :class:`~prompt_piper.optimization.recorder.RunRecorder`
         #: that receives every evaluation, candidate and phase timing.
         self.recorder = recorder
+        #: Optional ReplayStore (crash recovery), passed to every problem.
+        self.replay = replay
         #: Indices (into *dataset*) of the search subset; set by :meth:`_sample_subset`.
         self.search_indices: list[int] | None = None
         #: Evaluation cache shared by every problem built by this experiment
@@ -599,6 +602,7 @@ class Experiment:
             shared_cache=self._shared_eval_cache,
             cache_namespace=namespace,
             preserve_answer_cue=self.config.preserve_answer_cue,
+            replay=self.replay,
         )
 
     @staticmethod

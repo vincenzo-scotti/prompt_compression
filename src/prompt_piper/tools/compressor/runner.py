@@ -12,7 +12,7 @@ import numpy as np
 from prompt_piper.optimization.config import ExperimentConfig
 from prompt_piper.optimization.evaluator import MockEvaluator
 from prompt_piper.optimization.bits import bits_to_ids
-from prompt_piper.optimization.recorder import RunRecorder
+from prompt_piper.optimization.recorder import ReplayStore, RunRecorder
 from prompt_piper.optimization.runner import Experiment, sample_indices
 from prompt_piper.transformations import ALL_TRANSFORMATIONS
 
@@ -189,6 +189,7 @@ class CompressorRunner:
             fitting_elapsed = None
             factory = backend.get("transformation_factory")
 
+        replay = self._replay_store(recorder, run_cfg, backend)
         exp_config = self._make_exp_config(run_cfg, n_subset=run_cfg.n_search)
         exp = Experiment(
             config=exp_config,
@@ -198,6 +199,7 @@ class CompressorRunner:
             transformations=transform_classes,
             transformation_factory=factory,
             recorder=recorder,
+            replay=replay,
         )
 
         bit_layouts = {"search": exp.bit_layout(), "full": exp.bit_layout(full=True)}
@@ -321,6 +323,7 @@ class CompressorRunner:
             )
 
         recorder.update_meta(expected=expected)
+        self._finish_replay(recorder, exp.replay)
         validation = self._validate(recorder)
 
         return CompressorResult(
@@ -477,6 +480,7 @@ class CompressorRunner:
             )
         eval_elapsed = time.perf_counter() - t_eval_start
         recorder.update_meta(expected=expected)
+        self._finish_replay(recorder, exp.replay)
         validation = self._validate(recorder)
 
         return CompressorResult(
@@ -506,14 +510,70 @@ class CompressorRunner:
     # ------------------------------------------------------------------
 
     def _open_recorder(self, name: str) -> RunRecorder:
-        """Create ``{output.dir}/{name}_log``; keep any leftover as ``.incomplete-*``."""
+        """Create ``{output.dir}/{name}_log``; keep any leftover as ``.incomplete-*``.
+
+        The logs of interrupted attempts (``{name}_log.incomplete-*``) are
+        listed in ``recorder.previous_logs``; their evaluations can be replayed
+        (see :meth:`_replay_store`).
+        """
         log_dir = Path(self._config.output.dir) / f"{name}_log"
         if log_dir.exists():
             ts = CompressorResult.now_timestamp().replace(":", "-")
             backup = log_dir.with_name(f"{log_dir.name}.incomplete-{ts}")
             log_dir.rename(backup)
             logger.warning("Existing log directory moved to %s", backup)
-        return RunRecorder(log_dir)
+        recorder = RunRecorder(log_dir)
+        recorder.previous_logs = sorted(log_dir.parent.glob(f"{log_dir.name}.incomplete-*"))
+        return recorder
+
+    def _replay_store(self, recorder: RunRecorder, run_cfg: RunConfig, backend: dict):
+        """Crash recovery: evaluations from interrupted attempts of this run.
+
+        Records the run's fingerprint (model, generation settings, task,
+        splits) in ``meta.json`` and loads every earlier attempt with the same
+        fingerprint.  Returns ``None`` when there is nothing to replay.
+        """
+        import hashlib
+        import json as _json
+
+        operational = {"num_concurrent", "timeout", "max_retries", "batch_size"}
+        evaluator = backend.get("evaluator")
+        fingerprint_data = {
+            "model_type": self._config.model.type,
+            "model_name": self._config.model.name,
+            "model_kwargs": {k: v for k, v in self._config.model.kwargs.items() if k not in operational},
+            "quantization": self._config.model.quantization,
+            "generation_kwargs": getattr(evaluator, "_gen_kwargs", None),
+            "metric_key": run_cfg.metric_key,
+            "task": run_cfg.task,
+            "num_fewshot": run_cfg.num_fewshot,
+            "search_split": run_cfg.search_split,
+            "test_split": run_cfg.test_split,
+            "apply_chat_template": run_cfg.apply_chat_template,
+            "dry_run": self._dry_run,
+        }
+        fingerprint = hashlib.sha1(
+            _json.dumps(fingerprint_data, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        recorder.update_meta(replay_fingerprint=fingerprint, replay_fingerprint_data=fingerprint_data)
+        previous = getattr(recorder, "previous_logs", [])
+        if not previous:
+            return None
+        store = ReplayStore.from_logs(previous, fingerprint)
+        for src in store.sources:
+            if src["used"]:
+                logger.info("Crash recovery: %d evaluations available from %s", src["records"], src["log"])
+            else:
+                logger.warning("Crash recovery: ignoring %s (%s)", src["log"], src["reason"])
+        recorder.update_meta(replay={"sources": store.sources, "available": len(store), "used": 0})
+        return store if len(store) else None
+
+    @staticmethod
+    def _finish_replay(recorder: RunRecorder, store) -> None:
+        if store is not None:
+            meta_replay = {"sources": store.sources, "available": len(store), "used": store.used}
+            recorder.update_meta(replay=meta_replay)
+            logger.info("Crash recovery: %d evaluations reused instead of calling the model", store.used)
 
     @staticmethod
     def _split_indices(run_cfg: RunConfig, n_search_total: int, n_test_total: int):
@@ -741,6 +801,7 @@ class CompressorRunner:
             factory = self._compose_factory(fitted, semantic_backend)
         recorder.update_meta(fitting_report=fitting_report, fitted_on="target search sample")
 
+        replay = self._replay_store(recorder, target_run_cfg, target_backend)
         exp_config = self._make_exp_config(target_run_cfg, n_subset=len(target_dataset))
         exp = Experiment(
             config=exp_config,
@@ -750,6 +811,7 @@ class CompressorRunner:
             transformations=transform_classes,
             transformation_factory=factory,
             recorder=recorder,
+            replay=replay,
         )
 
         recorder.update_meta(
@@ -771,6 +833,7 @@ class CompressorRunner:
                 target_objectives = exp.evaluate_solutions(
                     source_bits, target_dataset, split="test", labels=labels,
                 )
+            self._finish_replay(recorder, exp.replay)
             self._validate(recorder)
         finally:
             recorder.close()

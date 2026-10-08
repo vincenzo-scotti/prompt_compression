@@ -224,3 +224,78 @@ def _environment() -> dict[str, Any]:
     except Exception:
         pass
     return env
+
+
+# ---------------------------------------------------------------------------
+# Crash recovery: replay evaluations already paid for in interrupted runs
+# ---------------------------------------------------------------------------
+
+#: Fields of an evaluation record that describe *this* run's logging rather
+#: than the model's answer; everything else is the evaluator's detail.
+_EVAL_META_KEYS = frozenset({
+    "id", "split", "sample_index", "sample_id", "target", "original_sha", "prompt_sha",
+    "original_tokens", "input_tokens", "batch_id", "batch_size", "batch_elapsed_seconds",
+    "output_tokens", "replayed_from", "phase", "method",
+})
+
+
+class ReplayStore:
+    """Evaluations from interrupted runs of the same experiment, for reuse.
+
+    Keyed by ``(method, split, sample_id, prompt_sha)``: a restarted run that
+    needs exactly this evaluation (same method, same sample, same prompt text)
+    reuses the stored answer instead of calling the model again.  Because the
+    restart repeats the search with the same seeds and gets the same answers,
+    it retraces the interrupted run exactly up to the crash point.
+
+    Only logs whose ``replay_fingerprint`` (model, generation settings, task,
+    splits) equals the current one are used.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[tuple, tuple[dict, str]] = {}
+        self.sources: list[dict] = []
+        self.used = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @classmethod
+    def from_logs(cls, log_dirs, fingerprint: str) -> "ReplayStore":
+        store = cls()
+        for d in sorted(Path(p) for p in log_dirs):
+            meta_path = d / "meta.json"
+            info = {"log": str(d), "used": False, "records": 0, "reason": None}
+            store.sources.append(info)
+            if not meta_path.exists():
+                info["reason"] = "no meta.json"
+                continue
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("replay_fingerprint") != fingerprint:
+                info["reason"] = "different model / generation settings / task (fingerprint mismatch)"
+                continue
+            for line in open(d / "evaluations.jsonl", encoding="utf-8"):
+                if not line.strip():
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:  # last line cut by the crash
+                    continue
+                key = (e.get("method"), e.get("split"), e.get("sample_id"), e.get("prompt_sha"))
+                store._entries.setdefault(key, (e, str(d)))
+                info["records"] += 1
+            info["used"] = True
+        return store
+
+    def lookup(self, method, split, sample_id, prompt: str):
+        """Return ``(detail, replayed_from)`` or ``None``."""
+        hit = self._entries.get((method, split, sample_id, text_sha(prompt)))
+        if hit is None:
+            return None
+        e, source = hit
+        self.used += 1
+        detail = {k: v for k, v in e.items() if k not in _EVAL_META_KEYS}
+        timing = {"batch_size": e.get("batch_size"),
+                  "batch_elapsed_seconds": e.get("batch_elapsed_seconds")}
+        origin = e.get("replayed_from") or {"log": source, "id": e.get("id")}
+        return detail, timing, origin

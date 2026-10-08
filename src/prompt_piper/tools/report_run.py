@@ -84,8 +84,9 @@ def report(log_dir: Path, show_prompt: bool = False) -> None:
     errors = Counter(e.get("error") for e in evals if e.get("error"))
     invalid = sum(1 for e in evals if any(f == "[invalid]" for f in (e.get("filtered") or [])))
     empty = sum(1 for e in evals if "output" in e and not str(e.get("output", "")).strip())
-    print(f"\nmodel calls: {len(evals)} | errors: {dict(errors) or 0} | '[invalid]' extractions: "
-          f"{invalid} | empty outputs: {empty}")
+    replayed = sum(1 for e in evals if "replayed_from" in e)
+    print(f"\nmodel calls: {len(evals)} (of which {replayed} reused from interrupted runs) | "
+          f"errors: {dict(errors) or 0} | '[invalid]' extractions: {invalid} | empty outputs: {empty}")
 
     # --- thinking ------------------------------------------------------------
     reasoning_text = sum(1 for e in evals if e.get("provider_reasoning"))
