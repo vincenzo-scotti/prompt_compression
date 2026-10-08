@@ -1,50 +1,34 @@
-# ICSE'26 — Full Benchmark Suite — google/gemma-4-26B-A4B-it (4-bit NF4, self-hosted)
+# ICSE'26 — Full Benchmark Suite — gemma4-26b-a4b-it served by llama.cpp via llama-swap
 #
-# Gemma 4 26B-A4B is a Mixture-of-Experts instruction-tuned model
-# (26B total params, ~4B active per token).  4-bit NF4 quantization keeps
-# peak VRAM under ~20 GB.
-#
-# Chat template: required for Gemma instruction-tuned ("-it") variants.
-# Few-shot formatting: the whole assembled prompt (instruction, few-shot
-# examples, question) is sent as ONE user turn wrapped in the chat template.
-# Multi-turn few-shot formatting is not supported: the examples are a text
-# section that the operators compress.  (The published runs had
-# fewshot_as_multiturn: true, which had no effect on what was sent.)
-# Stop sequence: Gemma uses <end_of_turn> as end-of-turn token.
-#
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
-#
-# Tasks (5 benchmarks — identical to GPT config):
-#   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
-#   bbh_cot_fewshot_logical_deduction_seven_objects,
-#   leaderboard_musr_murder_mysteries
-#
+# Server: llama-swap; its URL is read from LLAMA_CPP_BASE_URL and the API key
+# from LLAMA_CPP_API_KEY (both in .env, never in this file).  Requests go to the
+# OpenAI-compatible endpoint /v1/chat/completions; llama-swap selects the model
+# from the `name` below, which must match its model id.
+# The server applies the model's chat template; the whole prompt is sent as one
+# user turn.  Token counts come from the model's own /tokenize endpoint.
+# Thinking: disabled on every request (chat_template_kwargs.enable_thinking=false).
+# Tasks: mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
+#   bbh_cot_fewshot_logical_deduction_seven_objects (task settings in tasks.yaml).
 # mbpp_instruct requires: HF_ALLOW_CODE_EVAL=1
 
 task_library: ./tasks.yaml
 
 model:
-  type: hf
-  name: google/gemma-4-26B-A4B-it
+  type: llama-cpp
+  name: gemma4-26b-a4b-it
   kwargs:
-    batch_size: 4
-    max_length: 8192
-    device_map: auto
-    dtype: bfloat16
-    trust_remote_code: true
-  quantization:
-    load_in_4bit: true
-    bnb_4bit_quant_type: nf4
-    bnb_4bit_compute_dtype: bfloat16
-    bnb_4bit_use_double_quant: true
+    # Server URL: LLAMA_CPP_BASE_URL in .env (e.g. http://141.3.52.248:9292);
+    # a base_url here would take precedence.
+    llama_swap: true
+    disable_thinking: true
+    num_concurrent: 4        # adjust to the server's --parallel slots
 
 output:
-  dir: ./results/icse_26/gemma-4-26b-a4b-it
+  dir: ./results/icse_26_final/gemma4-26b-a4b-it
   overwrite: false
 
 defaults:
-  # Gemma instruct models require the chat template.
-  apply_chat_template: true
+  apply_chat_template: false   # the llama.cpp server applies the chat template
   fewshot_as_multiturn: false  # true is not supported (see header)
 
   use_fitting: true
@@ -70,7 +54,7 @@ defaults:
     - llmlingua2
 
   # Gemma end-of-turn token — appended to the task's own stop list.
-  extra_stop_sequences: ["<end_of_turn>"]
+  extra_stop_sequences: null   # the server stops at end-of-turn
 
   search_transformation_ids:
     - O1

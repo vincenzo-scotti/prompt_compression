@@ -164,6 +164,7 @@ class CompressorRunner:
             config=self._serialise_config(run_cfg),
             dry_run=self._dry_run,
             generation_kwargs=getattr(backend.get("evaluator"), "_gen_kwargs", None),
+            model_endpoint=getattr(getattr(backend.get("evaluator"), "_model", None), "base_url", None),
             transformation_ids=transform_ids,
             source_splits={"search": run_cfg.search_split, "test": run_cfg.test_split},
             source_split_sizes={"search": len(search_dataset), "test": len(test_full)},

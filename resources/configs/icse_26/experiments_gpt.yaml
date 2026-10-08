@@ -1,27 +1,12 @@
 # ICSE'26 — Full Benchmark Suite — gpt-5.4-nano-2026-03-17 (OpenAI Chat API)
 #
-# model_type: openai-chat  (NOT openai-chat-completions)
-# The openai-chat type calls LocalChatCompletion._create_payload directly,
-# bypassing the lm-eval o-series heuristic that checks "5" in model_name.
-# Without this, gpt-5.4-nano-2026-03-17 would have stop sequences stripped
-# and temperature forced to 1.
-#
-# Semantic operators (O23–O28): a universal guardrail in Transformation.__call__
-# reverts any operator that expands or empties the text, so operators can only
-# compress or be neutral, never expand.
-#
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
-# are defined in tasks.yaml and merged automatically.
-#
-# Tasks (5 benchmarks):
-#   mbpp_instruct                                  — code gen, pass@1, 3-shot
-#   mmlu_pro_computer_science                      — CS knowledge, acc, 5-shot CoT
-#   gsm8k_cot                                      — math reasoning, 8-shot CoT
-#   bbh_cot_fewshot_logical_deduction_seven_objects — reasoning, exact match, 3-shot
-#   leaderboard_musr_murder_mysteries              — multi-step reasoning, acc_norm, 0-shot
-#
-# Each task runs twice: NSGA-II (primary) and MAB (Thompson Sampling).
-# Requires: OPENAI_API_KEY
+# model_type: openai-chat (not openai-chat-completions): it bypasses lm-eval's
+# heuristic that strips stop sequences and forces temperature=1 for "5" models.
+# Thinking: reasoning_effort: none (the model's documented default, sent explicitly).
+# Requires OPENAI_API_KEY (in .env).
+# Tasks: mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
+#   bbh_cot_fewshot_logical_deduction_seven_objects (task settings in tasks.yaml).
+# mbpp_instruct requires: HF_ALLOW_CODE_EVAL=1
 
 task_library: ./tasks.yaml
 
@@ -31,11 +16,12 @@ model:
   kwargs:
     # gpt-5.4-nano does not support the 'stop' parameter.
     drop_stop_sequences: true
-    # Run four API requests in parallel to reduce wall-clock time.
     num_concurrent: 4
+    # No reasoning (documented default for gpt-5.4-nano; sent explicitly).
+    reasoning_effort: none
 
 output:
-  dir: ./results/icse_26/gpt-5.4-nano-2026-03-17
+  dir: ./results/icse_26_final/gpt-5.4-nano-2026-03-17
   overwrite: false
 
 defaults:

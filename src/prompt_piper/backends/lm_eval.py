@@ -65,6 +65,7 @@ class GenerationText(str):
     """
 
     usage: dict | None = None
+    reasoning: str | None = None
 
 
 def _parse_generations_with_usage(outputs, **kwargs) -> list:
@@ -76,12 +77,22 @@ def _parse_generations_with_usage(outputs, **kwargs) -> list:
         usage = out.get("usage") if isinstance(out, dict) else None
         if isinstance(out, dict) and "timings" in out:  # llama.cpp server
             usage = {**(usage or {}), "timings": out["timings"]}
-        for text in LocalChatCompletion.parse_generations(out):
+        reasoning = {}
+        if isinstance(out, dict):
+            for choice in out.get("choices", []) or []:
+                msg = choice.get("message") or {}
+                r = msg.get("reasoning_content") or msg.get("reasoning")
+                if r:
+                    reasoning[choice.get("index", 0)] = r
+        for i, text in enumerate(LocalChatCompletion.parse_generations(out)):
             if text is None:
                 res.append(None)
             else:
                 t = GenerationText(text)
                 t.usage = usage
+                # Visible reasoning returned by the provider (should be empty
+                # when thinking is disabled); logged to verify the setting.
+                t.reasoning = reasoning.get(i)
                 res.append(t)
     return res
 
@@ -126,8 +137,12 @@ def _load_model(model_type: str, model_name: str, **kwargs):
         class _OpenAIChatModel(OpenAIChatCompletion):
             parse_generations = staticmethod(_parse_generations_with_usage)
 
-            def __init__(self, drop_stop_sequences: bool = False, **kw):
+            def __init__(self, drop_stop_sequences: bool = False,
+                         reasoning_effort: str | None = None, **kw):
                 self._drop_stop = drop_stop_sequences
+                # Sent explicitly on every request (e.g. "none" for gpt-5.4-nano,
+                # whose documented default is also "none").
+                self._reasoning_effort = reasoning_effort
                 super().__init__(**kw)
 
             def _create_payload(
@@ -145,6 +160,8 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                     payload["max_completion_tokens"] = payload.pop("max_tokens")
                 if self._drop_stop:
                     payload.pop("stop", None)
+                if self._reasoning_effort is not None:
+                    payload["reasoning_effort"] = self._reasoning_effort
                 # Strip HuggingFace-only generation parameters not accepted by
                 # the OpenAI API (e.g. num_beams from task default gen_kwargs).
                 _HF_ONLY = {
@@ -172,8 +189,18 @@ def _load_model(model_type: str, model_name: str, **kwargs):
             parse_generations = staticmethod(_parse_generations_with_usage)
 
             def __init__(self, base_url=_GEMINI_BASE_URL,
-                         disable_thinking: bool = False, **kw):
-                self._disable_thinking = disable_thinking
+                         disable_thinking: bool = False,
+                         reasoning_effort: str | None = None, **kw):
+                # Gemini 3.x models cannot turn thinking off; the minimum is
+                # reasoning_effort="minimal".  "none" only works on Gemini 2.5
+                # non-Pro models.  The old disable_thinking flag was stored but
+                # never sent, so refuse it instead of silently ignoring it.
+                if disable_thinking:
+                    raise ValueError(
+                        "disable_thinking is not supported for Gemini; set reasoning_effort "
+                        "('none' for Gemini 2.5 non-Pro, 'minimal' for Gemini 3.x)."
+                    )
+                self._reasoning_effort = reasoning_effort
                 super().__init__(base_url=base_url, **kw)
 
             @property
@@ -196,6 +223,8 @@ def _load_model(model_type: str, model_name: str, **kwargs):
                     seed=seed, eos=eos, **kw
                 )
                 payload.pop("seed", None)
+                if self._reasoning_effort is not None:
+                    payload["reasoning_effort"] = self._reasoning_effort
                 # Gemini rejects stop=[] with a 400 error ("Value is not a string").
                 # Remove the key when the stop list is empty so the model generates
                 # until max_tokens without explicit stop sequences.
@@ -226,26 +255,66 @@ def _load_model(model_type: str, model_name: str, **kwargs):
 
 
 _LLAMA_CPP_DEFAULT_URL = "http://localhost:8080/v1/chat/completions"
+_LLAMA_CPP_URL_ENV = "LLAMA_CPP_BASE_URL"
+
+
+def _resolve_llama_cpp_url(base_url: str | None) -> str:
+    """Endpoint URL: config ``base_url`` > ``$LLAMA_CPP_BASE_URL`` > localhost:8080.
+
+    A server root (``http://host:port``) is completed with
+    ``/v1/chat/completions``.  Falling back to the default is logged as a
+    warning, so a missing ``.env`` entry is noticed.
+    """
+    import os as _os
+
+    url = base_url or _os.environ.get(_LLAMA_CPP_URL_ENV)
+    if not url:
+        logger.warning(
+            "No base_url in the config and %s is not set; using %s",
+            _LLAMA_CPP_URL_ENV, _LLAMA_CPP_DEFAULT_URL,
+        )
+        return _LLAMA_CPP_DEFAULT_URL
+    url = url.rstrip("/")
+    if "/v1/" not in url + "/":
+        url += "/v1/chat/completions"
+    elif url.endswith("/v1"):
+        url += "/chat/completions"
+    return url
 
 
 def _make_llama_cpp_model(model_name: str, **kwargs):
-    """Chat model served by a llama.cpp ``llama-server`` (OpenAI-compatible API).
+    """Chat model served by llama.cpp ``llama-server``, directly or via llama-swap.
 
-    Start the server with e.g.
-    ``llama-server -m model.gguf --port 8080 --jinja`` (``--jinja`` applies the
-    model's chat template).  YAML::
+    YAML (direct llama-server, started with ``--jinja``)::
 
         model:
           type: llama-cpp
-          name: qwen3.5-9b-q4_k_m          # label only; the server decides the model
+          name: qwen3.5-9b                 # label; a single server serves one model
           kwargs:
             base_url: http://localhost:8080/v1/chat/completions
             num_concurrent: 1              # match the server's --parallel slots
+            disable_thinking: true
 
-    Token counts use the server's own ``/tokenize`` endpoint, so they reflect
-    the served model's vocabulary exactly.  An API key, if the server was
-    started with ``--api-key``, is read from ``LLAMA_CPP_API_KEY``.
-    Log-likelihood tasks are not supported (no prompt log-probs over this API).
+    YAML (llama-swap, which routes requests to models by the ``model`` field)::
+
+        model:
+          type: llama-cpp
+          name: qwen3.5-9b                 # must be the model id configured in llama-swap
+          kwargs:
+            llama_swap: true               # URL from $LLAMA_CPP_BASE_URL (e.g. in .env)
+            disable_thinking: true
+
+    * **API key**: read from the environment variable named by ``api_key_env``
+      (default ``LLAMA_CPP_API_KEY``, e.g. set in ``.env``), sent as a Bearer token.
+    * **Token counts**: the served model's own ``/tokenize`` endpoint, so counts
+      match its vocabulary exactly.  Through llama-swap this is
+      ``/upstream/<model>/tokenize``; override with ``tokenize_url``.
+    * **Thinking**: ``disable_thinking: true`` sends
+      ``chat_template_kwargs: {"enable_thinking": false}`` on every request
+      (Qwen3/Gemma chat templates); extra ``chat_template_kwargs`` can be given.
+      Reasoning returned by the server is logged per call, so the setting can
+      be verified.
+    * Log-likelihood tasks are not supported (no prompt log-probs over this API).
     """
     import os as _os
 
@@ -255,15 +324,29 @@ def _make_llama_cpp_model(model_name: str, **kwargs):
     class _LlamaCppChatCompletion(LocalChatCompletion):
         parse_generations = staticmethod(_parse_generations_with_usage)
 
-        def __init__(self, base_url: str = _LLAMA_CPP_DEFAULT_URL, **kw):
+        def __init__(self, base_url: str | None = None, llama_swap: bool = False,
+                     api_key_env: str = "LLAMA_CPP_API_KEY", tokenize_url: str | None = None,
+                     disable_thinking: bool = False, chat_template_kwargs: dict | None = None,
+                     **kw):
             kw.setdefault("tokenizer_backend", None)
             kw.setdefault("tokenized_requests", False)
+            base_url = _resolve_llama_cpp_url(base_url)
             super().__init__(base_url=base_url, **kw)
             self.server_url = base_url.split("/v1/")[0].rstrip("/")
+            self._api_key_env = api_key_env
+            self._chat_template_kwargs = dict(chat_template_kwargs or {})
+            if disable_thinking:
+                self._chat_template_kwargs["enable_thinking"] = False
+            if tokenize_url is None:
+                tokenize_url = (
+                    f"{self.server_url}/upstream/{self.model}/tokenize" if llama_swap
+                    else f"{self.server_url}/tokenize"
+                )
+            self.tokenize_url = tokenize_url
 
         @property
         def api_key(self):
-            return _os.environ.get("LLAMA_CPP_API_KEY", "")
+            return _os.environ.get(self._api_key_env, "")
 
         def _create_payload(self, messages, generate=False, gen_kwargs=None,
                             seed=1234, eos=None, **kw):
@@ -276,12 +359,14 @@ def _make_llama_cpp_model(model_name: str, **kwargs):
                 payload.pop(key, None)
             if "stop" in payload and not payload["stop"]:
                 payload.pop("stop", None)
+            if self._chat_template_kwargs:
+                payload["chat_template_kwargs"] = dict(self._chat_template_kwargs)
             return payload
 
         def count_tokens(self, text: str) -> int:
             headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
             response = requests.post(
-                f"{self.server_url}/tokenize",
+                self.tokenize_url,
                 json={"content": text, "add_special": False},
                 headers=headers,
                 timeout=60,
@@ -1201,6 +1286,7 @@ i      ``process_results`` metric.
             detail: dict = {
                 "output": str(generated),
                 "provider_usage": getattr(generated, "usage", None),
+                "provider_reasoning": getattr(generated, "reasoning", None),
                 "sent_prompt": str(request.args[0] if hasattr(request, "args") else request[0]),
                 "filtered": filtered,
                 "gen_kwargs": self._gen_kwargs,

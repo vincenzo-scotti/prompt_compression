@@ -96,3 +96,67 @@ def test_provider_usage_reaches_evaluation(model, monkeypatch):
     detail = ev.evaluate_batch_detailed(["Q?"], ["Q?"], [{"_doc": {}}])[0]
     assert detail["score"] == 1.0 and detail["provider_usage"]["completion_tokens"] == 5
     assert type(detail["output"]) is str
+
+
+def test_llama_swap_routing_auth_and_thinking(monkeypatch):
+    monkeypatch.setenv("LLAMA_CPP_API_KEY", "secret")
+    m = _load_model("llama-cpp", "qwen3.5-9b", base_url="http://swap:9292/v1/chat/completions",
+                    llama_swap=True, disable_thinking=True)
+    assert m.tokenize_url == "http://swap:9292/upstream/qwen3.5-9b/tokenize"
+    assert m.header["Authorization"] == "Bearer secret"
+    payload = m._create_payload([{"role": "user", "content": "hi"}], generate=True,
+                                gen_kwargs={"max_gen_toks": 8})
+    assert payload["model"] == "qwen3.5-9b"
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+    seen = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None, **kw):
+        seen.update(url=url, headers=headers)
+        return _Resp({"tokens": [1, 2]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    assert m.count_tokens("x") == 2
+    assert seen["url"].endswith("/upstream/qwen3.5-9b/tokenize")
+    assert seen["headers"]["Authorization"] == "Bearer secret"
+
+
+def test_reasoning_content_is_captured(model, monkeypatch):
+    def fake_post(url, json=None, headers=None, **kw):
+        return _Resp({"choices": [{"message": {"content": "42", "reasoning_content": "hmm"}, "index": 0}]})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    req = _make_instance("generate_until", {}, (_wrap_chat_prompt("Q?"), {"max_gen_toks": 8}), 0)
+    out = model.generate_until([req], disable_tqdm=True)[0]
+    assert out == "42" and out.reasoning == "hmm"
+
+
+def test_gpt_and_gemini_reasoning_effort(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    msgs = [{"role": "user", "content": "hi"}]
+    gpt = _load_model("openai-chat", "gpt-5.4-nano-2026-03-17", reasoning_effort="none",
+                      drop_stop_sequences=True)
+    assert gpt._create_payload(msgs, generate=True, gen_kwargs={"max_gen_toks": 8})["reasoning_effort"] == "none"
+    gem = _load_model("gemini", "gemini-3.1-flash-lite", reasoning_effort="minimal")
+    assert gem._create_payload(msgs, generate=True, gen_kwargs={"max_gen_toks": 8})["reasoning_effort"] == "minimal"
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        _load_model("gemini", "gemini-3.1-flash-lite", disable_thinking=True)
+
+
+def test_base_url_resolution(monkeypatch, caplog):
+    from prompt_piper.backends.lm_eval import _resolve_llama_cpp_url
+
+    monkeypatch.delenv("LLAMA_CPP_BASE_URL", raising=False)
+    with caplog.at_level("WARNING"):
+        assert _resolve_llama_cpp_url(None) == "http://localhost:8080/v1/chat/completions"
+    assert "LLAMA_CPP_BASE_URL" in caplog.text
+    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://swap:9292/")
+    assert _resolve_llama_cpp_url(None) == "http://swap:9292/v1/chat/completions"
+    monkeypatch.setenv("LLAMA_CPP_BASE_URL", "http://swap:9292/v1")
+    assert _resolve_llama_cpp_url(None) == "http://swap:9292/v1/chat/completions"
+    # an explicit config value wins over the environment
+    assert _resolve_llama_cpp_url("http://cfg:1/v1/chat/completions") == "http://cfg:1/v1/chat/completions"
+    m = _load_model("llama-cpp", "qwen3.5-9b", llama_swap=True)
+    assert m.base_url == "http://swap:9292/v1/chat/completions"
+    assert m.tokenize_url == "http://swap:9292/upstream/qwen3.5-9b/tokenize"

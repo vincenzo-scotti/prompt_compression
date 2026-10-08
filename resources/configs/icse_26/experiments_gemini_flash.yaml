@@ -1,34 +1,24 @@
-# ICSE'26 — Full Benchmark Suite — gemini-3-flash-preview (Google Gemini API)
+# ICSE'26 — Full Benchmark Suite — gemini-3.1-flash-lite (Google Gemini API)
 #
-# Mirrors experiments_gpt.yaml for the Gemini Flash model.
-# The Gemini backend handles chat formatting internally; apply_chat_template
-# and fewshot_as_multiturn must be false (same pattern as OpenAI chat models).
-#
-# Task-specific settings (num_fewshot, compress_field, generation_kwargs)
-# are defined in tasks.yaml and merged automatically.
-#
-# Tasks (5 benchmarks — identical to GPT config):
-#   mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
-#   bbh_cot_fewshot_logical_deduction_seven_objects,
-#   leaderboard_musr_murder_mysteries
-#
-# Requires: GOOGLE_API_KEY (or GEMINI_API_KEY, whichever the backend expects)
-# mbpp_instruct also requires: HF_ALLOW_CODE_EVAL=1
+# Thinking: Gemini 3.x models cannot turn thinking off; it is set to the minimum
+# (reasoning_effort: minimal) on every request.
+# Requires GEMINI_API_KEY (in .env).
+# Tasks: mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
+#   bbh_cot_fewshot_logical_deduction_seven_objects (task settings in tasks.yaml).
+# mbpp_instruct requires: HF_ALLOW_CODE_EVAL=1
 
 task_library: ./tasks.yaml
 
 model:
   type: gemini
-  name: gemini-3-flash-preview
+  name: gemini-3.1-flash-lite
   kwargs:
-    # Gemini supports concurrent requests; 4 is a safe default for Flash.
     num_concurrent: 4
-    # Disable internal chain-of-thought to reduce latency. Sets thinking_budget=0
-    # on the OpenAI-compatible endpoint; max_tokens then reflects visible output only.
-    disable_thinking: true
+    # Minimum thinking (cannot be disabled on Gemini 3.x).
+    reasoning_effort: minimal
 
 output:
-  dir: ./results/icse_26/gemini-3-flash-preview
+  dir: ./results/icse_26_final/gemini-3.1-flash-lite
   overwrite: false
 
 defaults:
