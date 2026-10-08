@@ -240,7 +240,7 @@ Results are written as self-contained JSON files under `--output-dir`. Each file
 
 ## ICSE '26 experiments
 
-Preliminary experiments across six benchmarks, run once with a self-hosted model and once with GPT-4o. Results land in `results/icse_26/`.
+Preliminary experiments across six benchmarks, run once with a self-hosted model and once with GPT-4o. Results of the submitted paper are archived in `archive/icse_26_submission/`; final results land in `results/icse_26_final/`.
 
 ```bash
 mkdir -p logs

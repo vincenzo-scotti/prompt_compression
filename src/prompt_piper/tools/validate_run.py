@@ -2,7 +2,7 @@
 
 Usage::
 
-    python -m prompt_piper.tools.validate_run results/icse_26/<model>/<run>_log [...]
+    python -m prompt_piper.tools.validate_run results/icse_26_final/<model>/<run>_log [...]
 
 Exits with status 1 if any check fails.  The same function is called by the
 compressor at the end of every run and its report is stored in the result

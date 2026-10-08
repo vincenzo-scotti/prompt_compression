@@ -37,7 +37,7 @@ Usage
 -----
     python -m prompt_piper.tools.detailed_eval \\
         --config resources/configs/icse_26/experiments_gemini_flash.yaml \\
-        --results-dir results/icse_26/gemini-3-flash-preview \\
+        --results-dir results/icse_26_final/gemini-3.1-flash-lite \\
         --output detailed/gemini-3-flash-preview
 
     # Process only specific runs:
