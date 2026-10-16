@@ -1,6 +1,6 @@
 # Prompt Piper
 
-<img src="logo/v2.png" alt="pySAS logo" width="256">
+<img src="logo/v2.PNG" alt="pySAS logo" width="256">
 
 Prompt compression for token-efficient Large Language Models usage.
 
