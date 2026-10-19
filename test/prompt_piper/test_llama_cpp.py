@@ -138,10 +138,10 @@ def test_gpt_and_gemini_reasoning_effort(monkeypatch):
     gpt = _load_model("openai-chat", "gpt-5.4-nano-2026-03-17", reasoning_effort="none",
                       drop_stop_sequences=True)
     assert gpt._create_payload(msgs, generate=True, gen_kwargs={"max_gen_toks": 8})["reasoning_effort"] == "none"
-    gem = _load_model("gemini", "gemini-3.1-flash-lite", reasoning_effort="minimal")
+    gem = _load_model("gemini", "gemini-3.8-flash", reasoning_effort="minimal")
     assert gem._create_payload(msgs, generate=True, gen_kwargs={"max_gen_toks": 8})["reasoning_effort"] == "minimal"
     with pytest.raises(ValueError, match="reasoning_effort"):
-        _load_model("gemini", "gemini-3.1-flash-lite", disable_thinking=True)
+        _load_model("gemini", "gemini-3.8-flash", disable_thinking=True)
 
 
 def test_base_url_resolution(monkeypatch, caplog):

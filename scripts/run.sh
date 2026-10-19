@@ -69,7 +69,7 @@ for model in "${MODELS[@]}"; do
     echo "$(date '+%F %T')  starting ${model}"
     case "${model}" in
         gpt)    run_model gpt    ${CFG}/experiments_gpt.yaml          ${OUT}/gpt-5.4-nano-2026-03-17 "${OPTS[@]}" ;;
-        gemini) run_model gemini ${CFG}/experiments_gemini_flash.yaml ${OUT}/gemini-3.1-flash-lite   "${OPTS[@]}" ;;
+        gemini) run_model gemini ${CFG}/experiments_gemini_flash.yaml ${OUT}/gemini-3.8-flash   "${OPTS[@]}" ;;
         gemma)  run_model gemma  ${CFG}/experiments_gemma4_27b.yaml   ${OUT}/gemma4-26b-a4b-it       "${OPTS[@]}" ;;
         qwen)   run_model qwen   ${CFG}/experiments_qwen35_9b.yaml    ${OUT}/qwen3.5-9b              "${OPTS[@]}" ;;
     esac
