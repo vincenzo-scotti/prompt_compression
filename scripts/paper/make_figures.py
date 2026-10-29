@@ -63,9 +63,14 @@ BASELINES = {
     "llmlingua2": ("LLMLingua-2", "#98c379", "h"),
 }
 
-COL2, ROW_H = 13, 2.5  # previous style: full-width figure, inches
+# Figures are drawn at their printed size (IEEE two-column: text width 7.16 in, column
+# width 3.5 in), so the font sizes below are the sizes in the paper.
+TEXTW, COLW = 7.16, 3.5
 plt.rcParams.update({
-    "figure.dpi": 120, "font.size": 9,
+    "figure.dpi": 120, "font.size": 7.5, "axes.titlesize": 8, "axes.labelsize": 7.5,
+    "xtick.labelsize": 6.5, "ytick.labelsize": 6.5, "legend.fontsize": 7,
+    "axes.linewidth": 0.6, "xtick.major.width": 0.6, "ytick.major.width": 0.6,
+    "xtick.major.size": 2.5, "ytick.major.size": 2.5, "grid.linewidth": 0.5,
     "axes.spines.top": False, "axes.spines.right": False,
     "axes.grid": True, "grid.alpha": 0.3,
 })
@@ -88,7 +93,7 @@ def _front(sols, split):
 def fig_rq1(by):
     """Search (dashed) and test (solid) fronts of the three optimizers, best compromise
     highlighted (selected on S, plotted at its test values), baselines on the test set."""
-    fig, axes = plt.subplots(len(MODELS), len(TASKS), figsize=(COL2, ROW_H * len(MODELS) * 0.8),
+    fig, axes = plt.subplots(len(MODELS), len(TASKS), figsize=(TEXTW, 6.4),
                              squeeze=False, sharey="all", sharex="col")
     handles = {}
     for ri, (mdir, mlabel) in enumerate(MODELS):
@@ -99,27 +104,27 @@ def fig_rq1(by):
                 sols = run.solutions(key)
                 s = _front(sols, "search")
                 t = _front(sols, "test")
-                h1, = ax.plot(s[:, 0], s[:, 1], "--", color=color, lw=1, alpha=0.55,
-                              marker="o", ms=2.5, label=f"{label} (search)")
-                h2, = ax.plot(t[:, 0], t[:, 1], "-", color=color, lw=1.6,
-                              marker="o", ms=3, label=f"{label} (test)")
+                h1, = ax.plot(s[:, 0], s[:, 1], "--", color=color, lw=0.7, alpha=0.55,
+                              marker="o", ms=1.6, label=f"{label} (search)")
+                h2, = ax.plot(t[:, 0], t[:, 1], "-", color=color, lw=1.1,
+                              marker="o", ms=2, label=f"{label} (test)")
                 _, best = A.select_compromise(run, key, "search")
-                h3 = ax.scatter(best["test_avg_tokens"], best["test_avg_performance"], s=110,
-                                marker="*", color=color, edgecolors="white", linewidths=0.8,
+                h3 = ax.scatter(best["test_avg_tokens"], best["test_avg_performance"], s=60,
+                                marker="*", color=color, edgecolors="white", linewidths=0.5,
                                 zorder=7, label=f"{label} best compromise")
                 handles.update({h1.get_label(): h1, h2.get_label(): h2, h3.get_label(): h3})
             for key, (label, color, marker) in BASELINES.items():
                 b = run.baseline(key)
                 if b is None:
                     continue
-                h = ax.scatter(b["test_avg_tokens"], b["test_avg_performance"], s=55, marker=marker,
-                               color=color, edgecolors="white", linewidths=0.6, zorder=6, label=label)
+                h = ax.scatter(b["test_avg_tokens"], b["test_avg_performance"], s=26, marker=marker,
+                               color=color, edgecolors="white", linewidths=0.4, zorder=6, label=label)
                 handles[label] = h
             if ri == 0:
                 ax.set_title(tlabel, fontweight="bold")
             if ci == 0:
                 ax.set_ylabel("Avg performance")
-                ax.annotate(mlabel, xy=(-0.32, 0.5), xycoords="axes fraction", fontsize=10,
+                ax.annotate(mlabel, xy=(-0.42, 0.5), xycoords="axes fraction", fontsize=8,
                             fontweight="bold", rotation=90, va="center")
             if ri == len(MODELS) - 1:
                 ax.set_xlabel("Avg tokens")
@@ -129,8 +134,8 @@ def fig_rq1(by):
              for suffix in ("(search)", "(test)", "best compromise")]
     order += [BASELINES[k][0] for k in BASELINES]
     fig.legend([handles[k] for k in order if k in handles], [k for k in order if k in handles],
-               loc="lower center", ncol=5, fontsize=8, frameon=False)
-    fig.tight_layout(rect=(0, 0.07, 1, 1))
+               loc="lower center", ncol=5, frameon=False, handlelength=2.2)
+    fig.tight_layout(rect=(0, 0.075, 1, 1), h_pad=0.6, w_pad=0.8)
     fig.savefig(FIG / "rq1_fronts.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq1_fronts.png", bbox_inches="tight", dpi=110)
     plt.close(fig)
@@ -234,29 +239,31 @@ def fig_rq2_distributions(runs, pts):
         d["task"], d["method"] = row.task, row.method
         per.append(d)
     per = pd.concat(per, ignore_index=True)
-    fig, axes = plt.subplots(len(TASKS), 2, figsize=(6.3, ROW_H * len(TASKS) * 0.7),
-                             sharex="col", squeeze=False)
+    # Columns = benchmarks; top row performance, bottom row token distribution.
+    fig, axes = plt.subplots(2, len(TASKS), figsize=(TEXTW, 3.7), sharex=True, squeeze=False,
+                             gridspec_kw={"height_ratios": [1, 1.15]})
     for ti, (stem, tlabel) in enumerate(TASKS):
         sub = per[per.task == stem]
+        ax_p, ax_t = axes[0][ti], axes[1][ti]
         for mi, m in enumerate(methods):
             v = sub[sub.method == m]
             ci = 1.96 * v.score.std(ddof=1) / np.sqrt(len(v))
-            axes[ti][0].bar(mi, v.score.mean(), yerr=ci, width=0.7, color=color[m], alpha=0.85,
-                            capsize=3, error_kw={"lw": 1})
-        parts = axes[ti][1].violinplot([sub[sub.method == m].tokens for m in methods],
-                                       positions=range(len(methods)), showmedians=True, widths=0.8)
+            ax_p.bar(mi, v.score.mean(), yerr=ci, width=0.7, color=color[m], alpha=0.85,
+                     capsize=1.5, error_kw={"lw": 0.7, "capthick": 0.7})
+        parts = ax_t.violinplot([sub[sub.method == m].tokens for m in methods],
+                                positions=range(len(methods)), showmedians=True, widths=0.8)
         for body, m in zip(parts["bodies"], methods):
             body.set_facecolor(color[m]); body.set_alpha(0.6)
         for key in ("cmedians", "cmins", "cmaxes", "cbars"):
-            parts[key].set_color("#444444"); parts[key].set_linewidth(0.8)
-        axes[ti][0].set_ylabel(tlabel, fontweight="bold")
-        axes[ti][0].set_ylim(0, 1.05)
-    for ax in axes[-1]:
-        ax.set_xticks(range(len(methods)))
-        ax.set_xticklabels([label[m] for m in methods], rotation=60, ha="right", fontsize=8)
-    axes[0][0].set_title("Performance (95% CI)")
-    axes[0][1].set_title("Compressed tokens")
-    fig.tight_layout()
+            parts[key].set_color("#444444"); parts[key].set_linewidth(0.6)
+        ax_p.set_ylim(0, 1.05)
+        ax_p.set_title(tlabel, fontweight="bold")
+        ax_t.set_xticks(range(len(methods)))
+        ax_t.set_xticklabels([label[m] for m in methods], rotation=60, ha="right",
+                             rotation_mode="anchor")
+    axes[0][0].set_ylabel("Performance (95% CI)")
+    axes[1][0].set_ylabel("Compressed tokens")
+    fig.tight_layout(h_pad=0.4, w_pad=0.6)
     fig.savefig(FIG / "rq2_distributions.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq2_distributions.png", bbox_inches="tight", dpi=110)
     plt.close(fig)
@@ -318,27 +325,28 @@ def fig_llmlingua(df):
     tl = dict(TASKS); ml = dict(MODELS)
     order = [(m, t) for t, _ in TASKS for m, _ in MODELS]
     df = df.set_index(["model", "task"]).loc[order].reset_index()
-    fig, ax = plt.subplots(figsize=(6.3, 0.32 * len(df) + 1.2))
+    fig, ax = plt.subplots(figsize=(COLW, 0.26 * len(df) + 0.9))
     y = np.arange(len(df))[::-1]
     # Each series on its own sub-row so markers never hide each other (e.g. all at 0).
-    ax.scatter(df.llmlingua2_performance, y + 0.27, marker=BASELINES["llmlingua2"][2], s=50,
+    ax.scatter(df.llmlingua2_performance, y + 0.27, marker=BASELINES["llmlingua2"][2], s=22,
                color=BASELINES["llmlingua2"][1], edgecolors="white", zorder=5, label="LLMLingua-2")
     offsets = {"nsga2": 0.09, "random_search": -0.09, "multi_armed_bandit": -0.27}
     for key, (label, color) in OPTIMIZERS.items():
         v = df[f"{key}_performance"]
-        ax.scatter(v, y + offsets[key], marker="o", s=26, color=color, zorder=6,
-                   label=f"{label} (≥ same compression)")
-        ax.hlines(y + offsets[key], df.llmlingua2_performance, v, color=color, lw=0.8, alpha=0.5)
+        ax.scatter(v, y + offsets[key], marker="o", s=12, color=color, zorder=6, label=label)
+        ax.hlines(y + offsets[key], df.llmlingua2_performance, v, color=color, lw=0.6, alpha=0.5)
     none = df[[f"{k}_performance" for k in OPTIMIZERS]].isna().all(axis=1).to_numpy()
     for yi, flag in zip(y, none):
         if flag:
-            ax.text(1.03, yi, "no strategy reaches this compression", ha="right", va="center",
-                    fontsize=7, color="#666666", style="italic")
+            ax.text(1.04, yi, "none reaches it", ha="right", va="center",
+                    fontsize=6, color="#666666", style="italic")
     ax.set_yticks(y)
-    ax.set_yticklabels([f"{tl[t]} · {ml[m]}" for m, t in zip(df.model, df.task)], fontsize=7.5)
+    ax.set_yticklabels([f"{tl[t]} · {ml[m]}" for m, t in zip(df.model, df.task)], fontsize=6.5)
     ax.set_xlim(-0.05, 1.05)
-    ax.set_xlabel("Test performance at LLMLingua-2's compression level or higher")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.45, -0.09), ncol=2, fontsize=8, frameon=False)
+    ax.set_ylim(y.min() - 0.6, y.max() + 0.6)
+    ax.set_xlabel("Test performance")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.35, -0.07), ncol=4, frameon=False,
+              handletextpad=0.2, columnspacing=1.0)
     fig.tight_layout()
     fig.savefig(FIG / "rq2_llmlingua_matched.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq2_llmlingua_matched.png", bbox_inches="tight", dpi=110)
@@ -418,7 +426,7 @@ def cost_table(runs, pts):
 
 def fig_rq3_timing(cost):
     """Previous style: running time (search + test) per approach, per benchmark (log scale)."""
-    fig, axes = plt.subplots(1, len(TASKS), figsize=(COL2, 3.2), sharey=True, squeeze=False)
+    fig, axes = plt.subplots(1, len(TASKS), figsize=(TEXTW, 2.3), sharey=True, squeeze=False)
     label = {**{k: v[0] for k, v in OPTIMIZERS.items()}, **{k: v[0] for k, v in BASELINES.items()}}
     color = {**{k: v[1] for k, v in OPTIMIZERS.items()}, **{k: v[1] for k, v in BASELINES.items()}}
     for ci, (stem, tlabel) in enumerate(TASKS):
@@ -426,15 +434,19 @@ def fig_rq3_timing(cost):
         sub = cost[cost.task == stem]
         data = [(sub[sub.method == m].search_hours + sub[sub.method == m].test_hours) * 60
                 for m in ALL_METHODS]
-        bp = ax.boxplot(data, patch_artist=True, widths=0.6, medianprops={"color": "#222222"})
+        bp = ax.boxplot(data, patch_artist=True, widths=0.6,
+                        medianprops={"color": "#222222", "lw": 0.8}, boxprops={"lw": 0.6},
+                        whiskerprops={"lw": 0.6}, capprops={"lw": 0.6},
+                        flierprops={"ms": 2.5, "mew": 0.5})
         for patch, m in zip(bp["boxes"], ALL_METHODS):
             patch.set_facecolor(color[m]); patch.set_alpha(0.75)
         ax.set_yscale("log")
         ax.set_title(tlabel, fontweight="bold")
         ax.set_xticks(range(1, len(ALL_METHODS) + 1))
-        ax.set_xticklabels([label[m] for m in ALL_METHODS], rotation=60, ha="right", fontsize=8)
+        ax.set_xticklabels([label[m] for m in ALL_METHODS], rotation=60, ha="right",
+                           rotation_mode="anchor")
     axes[0][0].set_ylabel("Minutes (search + test)")
-    fig.tight_layout()
+    fig.tight_layout(w_pad=0.6)
     fig.savefig(FIG / "rq3_timing.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq3_timing.png", bbox_inches="tight", dpi=110)
     plt.close(fig)
@@ -443,7 +455,7 @@ def fig_rq3_timing(cost):
 def fig_rq3_convergence(conv):
     """Search-set hypervolume of the current front vs number of evaluated strategies,
     mean ± std across models, per benchmark."""
-    fig, axes = plt.subplots(1, len(TASKS), figsize=(COL2, 2.8), sharey=True, squeeze=False)
+    fig, axes = plt.subplots(1, len(TASKS), figsize=(TEXTW, 1.9), sharey=True, squeeze=False)
     grid = np.arange(1, 301)
     for ci, (stem, tlabel) in enumerate(TASKS):
         ax = axes[0][ci]
@@ -455,13 +467,13 @@ def fig_rq3_convergence(conv):
                 curves.append(np.interp(grid, g.n_visited, g.hypervolume, left=np.nan))
             c = np.array(curves)
             mean, std = np.nanmean(c, axis=0), np.nanstd(c, axis=0)
-            ax.plot(grid, mean, color=color, lw=1.6, label=label)
+            ax.plot(grid, mean, color=color, lw=1.1, label=label)
             ax.fill_between(grid, mean - std, mean + std, color=color, alpha=0.15, lw=0)
         ax.set_title(tlabel, fontweight="bold")
         ax.set_xlabel("Evaluated strategies")
     axes[0][0].set_ylabel("Hypervolume (search set)")
-    axes[0][1].legend(fontsize=8, frameon=False, loc="lower right")  # empty region
-    fig.tight_layout()
+    axes[0][0].legend(frameon=False, loc="upper right")  # empty region (MBPP curves are low)
+    fig.tight_layout(w_pad=0.6)
     fig.savefig(FIG / "rq3_convergence.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq3_convergence.png", bbox_inches="tight", dpi=110)
     plt.close(fig)
@@ -538,17 +550,19 @@ def fig_rq4_operators(g, op_order):
     cells = g[["model", "task", "method"]].drop_duplicates()
     n_fronts = len(cells)
     mean = (g.groupby(["section", "operator"]).effective_share.sum() / n_fronts).unstack(0).reindex(op_order).fillna(0)
-    fig, ax = plt.subplots(figsize=(6.3, 6.5))
+    fig, ax = plt.subplots(figsize=(COLW, 4.6))
     y = np.arange(len(op_order))[::-1]
     h = 0.27
     for i, (sec, (label, color)) in enumerate(SECTIONS.items()):
         ax.barh(y + (1 - i) * h, mean.get(sec, pd.Series(0, index=op_order)), height=h,
                 color=color, label=label)
     ax.set_yticks(y)
-    ax.set_yticklabels(op_order, fontsize=8)
-    ax.set_xlabel("Avg share of Pareto solutions in which the operator is effective")
+    ax.set_yticklabels(op_order)
+    ax.set_ylim(y.min() - 0.6, y.max() + 0.6)
+    ax.set_xlabel("Share of front strategies where effective")
     ax.set_xlim(0, 1)
-    ax.legend(loc="lower right", fontsize=8, frameon=True)
+    ax.legend(loc="lower center", bbox_to_anchor=(0.4, 1.0), ncol=3, frameon=False,
+              handlelength=1.2, handletextpad=0.4, columnspacing=0.9)
     fig.tight_layout()
     fig.savefig(FIG / "rq4_operators.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq4_operators.png", bbox_inches="tight", dpi=110)
@@ -581,41 +595,47 @@ def transfer_table(by):
 
 
 def fig_rq4_transfer(df):
-    """Previous style: rows = models; per direction a performance bar chart (95% CI over
-    front solutions) and a token violin plot; dashed line = no compression."""
+    """Rows = transfer directions; per model a performance bar chart (95% CI over front
+    solutions) and a token violin plot; dashed line = no compression."""
     colors = {"native": OPTIMIZERS["nsga2"][1], "transferred": "#d9a21b"}
-    fig, axes = plt.subplots(len(MODELS), 4, figsize=(6.3, ROW_H * len(MODELS) * 0.75), squeeze=False)
-    for ri, (mdir, mlabel) in enumerate(MODELS):
-        for di, (_, _, label) in enumerate(TRANSFER):
+    fig, axes = plt.subplots(len(TRANSFER), 2 * len(MODELS), figsize=(TEXTW, 2.9), squeeze=False)
+    for di, (_, _, label) in enumerate(TRANSFER):
+        for mi, (mdir, mlabel) in enumerate(MODELS):
             sub = df[(df.model == mdir) & (df.direction == label)]
-            ax_p, ax_t = axes[ri][2 * di], axes[ri][2 * di + 1]
+            ax_p, ax_t = axes[di][2 * mi], axes[di][2 * mi + 1]
             for xi, kind in enumerate(("native", "transferred")):
                 v = sub[sub.kind == kind]
                 ci = 1.96 * v.performance.std(ddof=1) / np.sqrt(len(v)) if len(v) > 1 else 0
                 ax_p.bar(xi, v.performance.mean(), yerr=ci, color=colors[kind], width=0.6,
-                         capsize=3, alpha=0.85)
+                         capsize=1.5, alpha=0.85, error_kw={"lw": 0.7, "capthick": 0.7})
                 parts = ax_t.violinplot([v.tokens], positions=[xi], showmedians=True, widths=0.7)
                 parts["bodies"][0].set_facecolor(colors[kind]); parts["bodies"][0].set_alpha(0.6)
                 for k in ("cmedians", "cmins", "cmaxes", "cbars"):
-                    parts[k].set_color("#444444"); parts[k].set_linewidth(0.8)
-            ax_p.axhline(sub.nc_performance.iloc[0], ls="--", color="#555555", lw=1)
-            ax_t.axhline(sub.nc_tokens.iloc[0], ls="--", color="#555555", lw=1)
+                    parts[k].set_color("#444444"); parts[k].set_linewidth(0.6)
+            ax_p.axhline(sub.nc_performance.iloc[0], ls="--", color="#555555", lw=0.7)
+            ax_t.axhline(sub.nc_tokens.iloc[0], ls="--", color="#555555", lw=0.7)
             ax_p.set_ylim(0, 1.05)
             for ax in (ax_p, ax_t):
                 ax.set_xticks([0, 1])
-                ax.set_xticklabels(["Native", "Transferred"] if ri == len(MODELS) - 1 else ["", ""],
-                                   fontsize=7, rotation=30)
-            if ri == 0:
-                ax_p.set_title(f"{label}\nPerformance", fontsize=8, fontweight="bold")
-                ax_t.set_title(f"{label}\nTokens", fontsize=8, fontweight="bold")
-        axes[ri][0].set_ylabel(mlabel, fontweight="bold", fontsize=8)
+                ax.set_xticklabels(["Native", "Transf."] if di == len(TRANSFER) - 1 else ["", ""],
+                                   rotation=45, ha="right", rotation_mode="anchor")
+                ax.set_xlim(-0.6, 1.6)
+            if di == 0:
+                ax_p.set_title("Performance", fontsize=7)
+                ax_t.set_title("Tokens", fontsize=7)
+        axes[di][0].set_ylabel(label, fontweight="bold")
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
     fig.legend([Patch(color=colors["native"]), Patch(color=colors["transferred"]),
-                Line2D([], [], ls="--", color="#555555")],
+                Line2D([], [], ls="--", color="#555555", lw=0.7)],
                ["Native NSGA-II front", "Transferred front", "No compression"],
-               loc="lower center", ncol=3, fontsize=8, frameon=False)
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
+               loc="lower center", ncol=3, frameon=False)
+    fig.tight_layout(rect=(0, 0.06, 1, 0.94), h_pad=0.6, w_pad=0.3)
+    # One bold model title centered over each performance/tokens pair.
+    for mi, (_, mlabel) in enumerate(MODELS):
+        left, right = axes[0][2 * mi].get_position(), axes[0][2 * mi + 1].get_position()
+        fig.text((left.x0 + right.x1) / 2, 0.975, mlabel, ha="center", va="center",
+                 fontsize=8, fontweight="bold")
     fig.savefig(FIG / "rq4_transfer.pdf", bbox_inches="tight")
     fig.savefig(FIG / "rq4_transfer.png", bbox_inches="tight", dpi=110)
     plt.close(fig)
