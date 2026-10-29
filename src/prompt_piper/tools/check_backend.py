@@ -2,7 +2,7 @@
 
 Usage::
 
-    python -m prompt_piper.tools.check_backend --config resources/configs/icse_26/experiments_qwen35_9b.yaml
+    python -m prompt_piper.tools.check_backend --config resources/configs/experiments/experiments_qwen35_9b.yaml
 
 Loads the configured model exactly as the compressor does, then reports:
 

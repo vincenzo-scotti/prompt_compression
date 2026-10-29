@@ -1,4 +1,4 @@
-"""Integration test on the real ICSE'26 benchmarks (skipped without cached datasets).
+"""Integration test on the real experiment benchmarks (skipped without cached datasets).
 
 For every sample of every task, the uncompressed prompt assembled from the
 instruction / shots / data / cue sections must equal the instruction prefix +
@@ -22,7 +22,7 @@ from prompt_piper.optimization.runner import Experiment
 from prompt_piper.tools.compressor.config import CompressorConfig
 from prompt_piper.tools.compressor.runner import CompressorRunner
 
-CONFIG = Path(__file__).resolve().parents[2] / "resources/configs/icse_26/experiments_qwen35_9b.yaml"
+CONFIG = Path(__file__).resolve().parents[2] / "resources/configs/experiments/experiments_qwen35_9b.yaml"
 # marker counted once per example (shots) + once for the question
 MARKERS = {
     "mbpp_instruct": ("You are an expert Python programmer", 3),

@@ -1,7 +1,7 @@
 # Paper analysis (TSE)
 
 Every figure, table and number of the paper is computed here from the complete run logs
-(`results/icse_26_final/`). Run everything, in order, with
+(`results/experiments/`). Run everything, in order, with
 
     python scripts/paper/run_all.py
 

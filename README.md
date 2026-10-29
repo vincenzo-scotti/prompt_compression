@@ -240,21 +240,17 @@ python -m prompt_piper.tools.compressor \
 
 Results are written as self-contained JSON files under `--output-dir`. Each file includes the full configuration, Pareto-optimal solutions with both search and test objectives, baseline comparisons, and (when fitting was used) the discovered vocabulary patterns.
 
-## ICSE '26 experiments
+## Experiments
 
-Preliminary experiments across six benchmarks, run once with a self-hosted model and once with GPT-4o. Results of the submitted paper are archived in `archive/icse_26_submission/`; final results land in `results/icse_26_final/`.
+Four models (gpt-5.4-nano, gemini-3.8-flash, gemma4-26b-a4b-it, qwen3.5-9b) on four benchmarks (GSM8K, BBH logical deduction, MBPP, MMLU-Pro CS), with NSGA-II, multi-armed bandit, random search and the compression baselines. Configs live in `resources/configs/experiments/`; results and complete run logs land in `results/experiments/<model>/`.
 
 ```bash
-mkdir -p logs
-
-# Qwen/Qwen3.5-9B (GPU required) — GSM8K, ARC Challenge, MMLU, IFEval, GPQA, BBH
-nohup bash scripts/preliminary_run.sh > logs/preliminary_hf.log 2>&1 &
-
-# GPT-4o (requires OPENAI_API_KEY in .env) — same tasks via generative variants
-nohup bash scripts/preliminary_run_chatgpt.sh > logs/preliminary_chatgpt.log 2>&1 &
+bash scripts/run.sh                       # all four models
+bash scripts/run.sh gemma qwen            # only the listed models (gpt, gemini, gemma, qwen)
+bash scripts/run.sh gemma qwen --dry-run  # CPU-only smoke test (mock evaluator)
 ```
 
-Both scripts load `.env` automatically, are restartable (completed runs are skipped), and accept `--dry-run` for a CPU-only smoke test.
+The script loads `.env` automatically and is restartable (completed runs are skipped, interrupted ones recovered). `python scripts/paper/run_all.py` (or `notebooks/paper.ipynb`) computes every figure, table and number of the paper from the run logs.
 
 ## Notebooks
 

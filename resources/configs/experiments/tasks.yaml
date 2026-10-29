@@ -1,4 +1,4 @@
-# Task library — shared source of truth for all model configs in icse_26.
+# Task library — shared source of truth for all model configs in this directory.
 #
 # Each task entry defines the settings that are FIXED regardless of which model
 # is evaluated. Model configs reference this file via `task_library: ./tasks.yaml`

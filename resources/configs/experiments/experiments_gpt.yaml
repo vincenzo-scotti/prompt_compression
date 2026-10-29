@@ -1,12 +1,9 @@
-# ICSE'26 — Full Benchmark Suite — gemma4-26b-a4b-it served by llama.cpp via llama-swap
+# PromptPiper experiments — gpt-5.4-nano-2026-03-17 (OpenAI Chat API)
 #
-# Server: llama-swap; its URL is read from LLAMA_CPP_BASE_URL and the API key
-# from LLAMA_CPP_API_KEY (both in .env, never in this file).  Requests go to the
-# OpenAI-compatible endpoint /v1/chat/completions; llama-swap selects the model
-# from the `name` below, which must match its model id.
-# The server applies the model's chat template; the whole prompt is sent as one
-# user turn.  Token counts come from the model's own /tokenize endpoint.
-# Thinking: disabled on every request (chat_template_kwargs.enable_thinking=false).
+# model_type: openai-chat (not openai-chat-completions): it bypasses lm-eval's
+# heuristic that strips stop sequences and forces temperature=1 for "5" models.
+# Thinking: reasoning_effort: none (the model's documented default, sent explicitly).
+# Requires OPENAI_API_KEY (in .env).
 # Tasks: mbpp_instruct, mmlu_pro_computer_science, gsm8k_cot,
 #   bbh_cot_fewshot_logical_deduction_seven_objects (task settings in tasks.yaml).
 # mbpp_instruct requires: HF_ALLOW_CODE_EVAL=1
@@ -14,24 +11,24 @@
 task_library: ./tasks.yaml
 
 model:
-  type: llama-cpp
-  name: gemma4-26b-a4b-it
+  type: openai-chat
+  name: gpt-5.4-nano-2026-03-17
   kwargs:
-    # Server URL: LLAMA_CPP_BASE_URL in .env (e.g. http://141.3.52.248:9292);
-    # a base_url here would take precedence.
-    llama_swap: true
-    disable_thinking: true
-    num_concurrent: 4        # adjust to the server's --parallel slots
+    # gpt-5.4-nano does not support the 'stop' parameter.
+    drop_stop_sequences: true
+    num_concurrent: 4
     timeout: 900             # seconds per request (lm-eval default 300)
     max_retries: 10          # lm-eval default 3
+    # No reasoning (documented default for gpt-5.4-nano; sent explicitly).
+    reasoning_effort: none
 
 output:
-  dir: ./results/icse_26_final/gemma4-26b-a4b-it
+  dir: ./results/experiments/gpt-5.4-nano-2026-03-17
   overwrite: false
 
 defaults:
-  apply_chat_template: false   # the llama.cpp server applies the chat template
-  fewshot_as_multiturn: false  # true is not supported (see header)
+  apply_chat_template: false
+  fewshot_as_multiturn: false
 
   use_fitting: true
   use_llm_for_semantic: true
@@ -55,9 +52,7 @@ defaults:
     - random_deletion
     - llmlingua2
 
-  # Gemma end-of-turn token — appended to the task's own stop list.
-  extra_stop_sequences: null   # the server stops at end-of-turn
-
+  extra_stop_sequences: null
   search_transformation_ids:
     - O1
     - O2
@@ -96,11 +91,14 @@ transferability:
 runs:
 
   # ═══════════════════════════════════════════════ MBPP-Instruct ══════════════
+  # Task settings (num_fewshot, compress_field, generation_kwargs)
+  # come from tasks.yaml.
+  # Requires: HF_ALLOW_CODE_EVAL=1
   - name: mbpp_instruct_nsga2
     task: mbpp_instruct
     algorithm: nsga2
 
- # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
+  # ═══════════════════════════════════════════════ MMLU-Pro (CS) ══════════════
   - name: mmlu_pro_cs_nsga2
     task: mmlu_pro_computer_science
     algorithm: nsga2

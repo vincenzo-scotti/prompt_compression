@@ -1,4 +1,4 @@
-# ICSE'26 — Full Benchmark Suite — qwen3.5-9b served by llama.cpp via llama-swap
+# PromptPiper experiments — qwen3.5-9b served by llama.cpp via llama-swap
 #
 # Server: llama-swap; its URL is read from LLAMA_CPP_BASE_URL and the API key
 # from LLAMA_CPP_API_KEY (both in .env, never in this file).  Requests go to the
@@ -26,7 +26,7 @@ model:
     max_retries: 10          # lm-eval default 3
 
 output:
-  dir: ./results/icse_26_final/qwen3.5-9b
+  dir: ./results/experiments/qwen3.5-9b
   overwrite: false
 
 defaults:

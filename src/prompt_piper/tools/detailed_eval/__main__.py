@@ -36,8 +36,8 @@ eval_elapsed_seconds float — wall-clock seconds for model inference (per examp
 Usage
 -----
     python -m prompt_piper.tools.detailed_eval \\
-        --config resources/configs/icse_26/experiments_gemini_flash.yaml \\
-        --results-dir results/icse_26_final/gemini-3.8-flash \\
+        --config resources/configs/experiments/experiments_gemini_flash.yaml \\
+        --results-dir results/experiments/gemini-3.8-flash \\
         --output detailed/gemini-3.8-flash
 
     # Process only specific runs:

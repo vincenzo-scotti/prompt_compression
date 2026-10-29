@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Run the ICSE'26 experiments (final version) for all four models.
+# Run the PromptPiper experiments for all four models.
 #
 # Restartable: completed runs are skipped automatically.  Results and complete
-# run logs go to results/icse_26_final/<model>/; every run log is validated
+# run logs go to results/experiments/<model>/; every run log is validated
 # (no missing data points) after each model.
 #
 # Usage:
@@ -62,8 +62,8 @@ run_model () {
         || { echo "Log validation failed for ${name}: see logs/${name}_validation.log"; exit 1; }
 }
 
-CFG=resources/configs/icse_26
-OUT=results/icse_26_final
+CFG=resources/configs/experiments
+OUT=results/experiments
 
 for model in "${MODELS[@]}"; do
     echo "$(date '+%F %T')  starting ${model}"
