@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Raw experiment results (published compressed in results/experiments_archive/)
+results/experiments/
