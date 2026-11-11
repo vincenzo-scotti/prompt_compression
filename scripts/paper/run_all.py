@@ -13,6 +13,7 @@ HERE = Path(__file__).resolve().parent
 STEPS = [
     # (script, what it produces)
     ("make_figures.py", "RQ1-RQ4 figures and CSVs (fronts, compromises, hypervolume, statistics, cost, operators, transfer)"),
+    ("bootstrap.py", "RQ2 paired bootstrap of per-cell performance differences"),
     ("cost_extended.py", "RQ3 break-even including output tokens"),
     ("make_tables.py", "LaTeX tables (compromise, post-hoc, hypervolume, cost)"),
     ("paper_numbers.py", "numbers quoted in the text"),

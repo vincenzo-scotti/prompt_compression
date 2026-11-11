@@ -12,6 +12,7 @@ are set in `paths.py` (`PP_RESULTS_DIR`, `PP_PAPER_DIR`); outputs go to
 | Script | Content |
 |---|---|
 | `make_figures.py` | RQ1 fronts; RQ2 compromises, hypervolume, Friedman/Wilcoxon, LLMLingua-2 at equal compression; RQ3 cost, timing, convergence; RQ4 effective operators, transfer |
+| `bootstrap.py` | RQ2 paired bootstrap CIs of per-cell performance differences (vs No compression, between optimizers) |
 | `cost_extended.py` | RQ3 break-even including output tokens |
 | `make_tables.py` | LaTeX tables of the paper |
 | `paper_numbers.py`, `extra_numbers.py`, `repeatability.py`, `generalization.py` | numbers quoted in the text |
