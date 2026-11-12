@@ -1,10 +1,8 @@
-# Prompt Piper
-
-<img src="logo/v2.png" alt="pySAS logo" width="256">
+# Prompt Zipper
 
 Prompt compression for token-efficient Large Language Models usage.
 
-Prompt Piper searches for the best sequence of text transformations to shorten a prompt while preserving task performance. The search is framed as a multi-objective optimisation problem (minimise token count, maximise task accuracy) solved via evolutionary algorithms (NSGA-II, NSGA-III, MOEA/D).
+Prompt Zipper searches for the best sequence of text transformations to shorten a prompt while preserving task performance. The search is framed as a multi-objective optimisation problem (minimise token count, maximise task accuracy) solved via evolutionary algorithms (NSGA-II, NSGA-III, MOEA/D).
 
 ## Quick start
 
